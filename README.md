@@ -1,24 +1,26 @@
-# facet
+# Facet
 
-[![Package Version](https://img.shields.io/hexpm/v/facet)](https://hex.pm/packages/facet)
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://facet.hexdocs.pm/)
+CLI and Tauri desktop client for [Crystalline](https://github.com/manudiv16/crystalline) — an embedded AI workflow orchestration engine.
 
-```sh
-gleam add facet@1
+## Architecture
+
 ```
-```gleam
-import facet
-
-pub fn main() -> Nil {
-  // TODO: An example of the project in use
-}
+Facet CLI ──┐
+            ├→ HTTP → Crystalline (Wisp+Mist) → libsql (local | Turso)
+Facet Tauri ┘
 ```
 
-Further documentation can be found at <https://facet.hexdocs.pm/>.
+Facet is the interface layer; Crystalline is the engine.
 
-## Development
+### Modes
+- **Embedded**: Facet launches Crystalline as a local sidecar, communicates over localhost HTTP
+- **Remote**: Facet connects to a deployed Crystalline instance (Turso-hosted or self-hosted)
 
-```sh
-gleam run   # Run the project
-gleam test  # Run the tests
-```
+Same code, only the connection URL changes.
+
+## Status
+
+🚧 Scaffolded — awaiting implementation. See [crystalline](https://github.com/manudiv16/crystalline) for the engine implementation plan.
+
+## Related
+- [Crystalline](https://github.com/manudiv16/crystalline) — Backend engine (Gleam + libsql)
