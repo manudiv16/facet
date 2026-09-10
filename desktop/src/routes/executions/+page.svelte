@@ -1,11 +1,11 @@
-// Execution history and session log viewer (F6).
-//
-// The page is a per-task history viewer: pick a task (or deep-link with
-// `?task=`), and ExecutionHistory renders one row per step with token/cost
-// metrics and a selectable session log. When no task is selected the page
-// shows the live "active" executions overview (running + awaiting_input),
-// clicking one of which binds the selection to its task.
 <script lang="ts">
+	// Execution history and session log viewer (F6).
+	//
+	// The page is a per-task history viewer: pick a task (or deep-link with
+	// `?task=`), and ExecutionHistory renders one row per step with token/cost
+	// metrics and a selectable session log. When no task is selected the page
+	// shows the live "active" executions overview (running + awaiting_input),
+	// clicking one of which binds the selection to its task.
 	import { onMount, onDestroy } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/stores";

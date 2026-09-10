@@ -26,6 +26,17 @@ const port = Number(process.env.PORT || 8787);
 const db = process.env.CRYSTALLINE_DB || null;
 const version = "0.1.0-stub";
 
+// The desktop shell fetches this API cross-origin: from the Vite dev server
+// (`http://localhost:1420`) in the browser and from the Tauri webview origin in
+// the packaged app. Crystalline answers with permissive CORS headers; the stub
+// mirrors that so the UI is exercisable without a real engine.
+const CORS_HEADERS = {
+	"access-control-allow-origin": "*",
+	"access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+	"access-control-allow-headers": "content-type, authorization",
+	"access-control-max-age": "86400",
+};
+
 const NOW = Math.floor(Date.now() / 1000);
 
 // ─── Seeded data ────────────────────────────────────────────────────────────
@@ -41,7 +52,7 @@ const tasks = [
 		status: "done",
 		tags: ["facet", "demo"],
 		parent_id: null,
-		flow_template_id: "linear",
+		flow_template_id: "implement_review",
 		flow_instance_id: "flow-1",
 		current_node_id: null,
 		worktree: null,
@@ -59,9 +70,9 @@ const tasks = [
 		status: "in_progress",
 		tags: ["ops"],
 		parent_id: null,
-		flow_template_id: "linear",
+		flow_template_id: "design_implement",
 		flow_instance_id: "flow-2",
-		current_node_id: "approve",
+		current_node_id: "design_review",
 		worktree: null,
 		archived: false,
 		created_at: NOW - 3600,
@@ -77,7 +88,7 @@ const tasks = [
 		status: "done",
 		tags: ["data"],
 		parent_id: null,
-		flow_template_id: "loop",
+		flow_template_id: "refactor_loop",
 		flow_instance_id: "flow-3",
 		current_node_id: null,
 		worktree: null,
@@ -86,6 +97,12 @@ const tasks = [
 		updated_at: NOW - 86400,
 	},
 ];
+
+/**
+ * Task dependencies as `blockedTaskId -> Set<blockerId>`; blockers must reach a
+ * terminal state before the dependent task leaves the ready queue.
+ */
+const blockedBy = new Map();
 
 function step(
 	id,
@@ -455,6 +472,330 @@ const logsByExecution = {
 	logsByExecution["ex-big-120"] = rows;
 }
 
+// ─── Flow templates ─────────────────────────────────────────────────────────
+
+// Mirrors Crystalline's prebuilt registry (`flow/templates.gleam`, C11) and the
+// desktop fallback catalogue in `desktop/src/lib/seeded-templates.ts`. Node ids,
+// types and transitions match the engine definitions so the flow graph renders
+// identically whichever source supplies it.
+
+function stepNode(id, name, goal) {
+	return {
+		id,
+		name,
+		node_type: "step",
+		goal,
+		prompt: goal,
+		child_ids: [],
+		branch_rules: [],
+		loop_config: null,
+		agent_config: null,
+		output_schema: null,
+	};
+}
+
+const flowTemplates = [
+	{
+		id: "implement_review",
+		slug: "implement_review",
+		name: "Implement & Review",
+		description:
+			"Linear flow: research the codebase, implement changes, write tests, then review the result.",
+		initial_node_id: "research",
+		nodes: [
+			stepNode("research", "Research the codebase", "Explore the relevant codebase areas and existing patterns."),
+			stepNode("implement", "Implement the changes", "Make the required code changes following the discovered patterns."),
+			stepNode("test", "Write and run tests", "Create tests that validate the implementation and run them."),
+			stepNode("review", "Review the result", "Review all changes, check edge cases and code quality."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "research", to_id: "implement", condition: null, label: null },
+			{ id: "t2", from_id: "implement", to_id: "test", condition: null, label: null },
+			{ id: "t3", from_id: "test", to_id: "review", condition: null, label: null },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+	{
+		id: "bugfix",
+		slug: "bugfix",
+		name: "Bug Fix",
+		description:
+			"Linear flow: reproduce the bug, diagnose the root cause, implement a fix, then verify.",
+		initial_node_id: "reproduce",
+		nodes: [
+			stepNode("reproduce", "Reproduce the bug", "Create a minimal reproduction and confirm the failure mode."),
+			stepNode("diagnose", "Diagnose root cause", "Trace the code to identify the root cause."),
+			stepNode("fix", "Implement the fix", "Write a targeted fix for the identified root cause."),
+			stepNode("verify", "Verify the fix", "Run the reproduction and related tests to confirm no regressions."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "reproduce", to_id: "diagnose", condition: null, label: null },
+			{ id: "t2", from_id: "diagnose", to_id: "fix", condition: null, label: null },
+			{ id: "t3", from_id: "fix", to_id: "verify", condition: null, label: null },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+	{
+		id: "refactor_loop",
+		slug: "refactor_loop",
+		name: "Refactor Loop",
+		description:
+			"Loop-based flow: refactor a file and run tests until they pass (max 50 iterations).",
+		initial_node_id: "identify_file",
+		nodes: [
+			stepNode("identify_file", "Identify file to refactor", "Determine which file needs refactoring."),
+			{
+				id: "refactor_loop",
+				name: "Refactor & Test Loop",
+				node_type: "loop",
+				goal: "Refactor the file and run tests until all tests pass",
+				prompt: null,
+				child_ids: ["refactor_file", "run_tests"],
+				branch_rules: [],
+				loop_config: {
+					max_iterations: 50,
+					exit_condition: "tests_pass",
+					child_ids: ["refactor_file", "run_tests"],
+				},
+				agent_config: null,
+				output_schema: null,
+			},
+			stepNode("refactor_file", "Refactor the file", "Extract functions, simplify logic, improve naming."),
+			stepNode("run_tests", "Run the test suite", "Run the suite and set tests_pass=true when green."),
+			stepNode("summarize", "Summarize refactoring", "Summarize what changed and the final test status."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "identify_file", to_id: "refactor_loop", condition: null, label: null },
+			{ id: "t2", from_id: "refactor_loop", to_id: "summarize", condition: "loop_exit", label: "loop_exit" },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+	{
+		id: "review_gate",
+		slug: "review_gate",
+		name: "Review Gate",
+		description:
+			"Branching flow: approve to finish, request changes to fix and re-review, or reject to roll back.",
+		initial_node_id: "review",
+		nodes: [
+			stepNode("review", "Review the changes", "Examine the changes for correctness and code quality."),
+			{
+				id: "gate_branch",
+				name: "Approval Gate",
+				node_type: "branch",
+				goal: "Route on the review decision",
+				prompt: null,
+				child_ids: [],
+				branch_rules: [
+					{ condition: "approved", target_id: "done" },
+					{ condition: "changes_requested", target_id: "fix" },
+					{ condition: "rejected", target_id: "rollback" },
+				],
+				loop_config: null,
+				agent_config: null,
+				output_schema: null,
+			},
+			stepNode("done", "Mark as approved", "Mark the task as complete."),
+			stepNode("fix", "Address review comments", "Make targeted changes for each comment."),
+			stepNode("re_review", "Re-review after fixes", "Verify all review comments were addressed."),
+			stepNode("rollback", "Rollback changes", "Revert the changes and document the reason."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "review", to_id: "gate_branch", condition: null, label: null },
+			{ id: "t2", from_id: "gate_branch", to_id: "done", condition: "approved", label: "approved" },
+			{ id: "t3", from_id: "gate_branch", to_id: "fix", condition: "changes_requested", label: "changes requested" },
+			{ id: "t4", from_id: "gate_branch", to_id: "rollback", condition: "rejected", label: "rejected" },
+			{ id: "t5", from_id: "fix", to_id: "re_review", condition: null, label: null },
+			{ id: "t6", from_id: "re_review", to_id: "gate_branch", condition: null, label: "re-evaluate" },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+	{
+		id: "multi_file_analysis",
+		slug: "multi_file_analysis",
+		name: "Multi-File Analysis",
+		description:
+			"Parallel flow: analyze multiple files concurrently, then synthesize a unified report.",
+		initial_node_id: "identify_files",
+		nodes: [
+			stepNode("identify_files", "Identify files to analyze", "Determine which files need analysis."),
+			{
+				id: "parallel_analysis",
+				name: "Parallel File Analysis",
+				node_type: "parallel",
+				goal: "Analyze multiple files concurrently",
+				prompt: null,
+				child_ids: ["analyze_file_a", "analyze_file_b", "analyze_file_c"],
+				branch_rules: [],
+				loop_config: null,
+				agent_config: null,
+				output_schema: null,
+			},
+			stepNode("analyze_file_a", "Analyze file A", "Check structure, dependencies and issues."),
+			stepNode("analyze_file_b", "Analyze file B", "Check structure, dependencies and issues."),
+			stepNode("analyze_file_c", "Analyze file C", "Check structure, dependencies and issues."),
+			stepNode("synthesize", "Synthesize findings", "Combine results into a unified report."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "identify_files", to_id: "parallel_analysis", condition: null, label: null },
+			{ id: "t2", from_id: "parallel_analysis", to_id: "synthesize", condition: null, label: null },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+	{
+		id: "design_implement",
+		slug: "design_implement",
+		name: "Design & Implement",
+		description:
+			"Human-in-the-loop flow: research, design, get approval, implement, then test.",
+		initial_node_id: "research",
+		nodes: [
+			stepNode("research", "Research requirements", "Understand requirements and constraints."),
+			stepNode("design", "Design the solution", "Write a design document with approach and trade-offs."),
+			{
+				id: "design_review",
+				name: "Design Review",
+				node_type: "human_input",
+				goal: "Get human approval on the design before implementation",
+				prompt: "Review the proposed design. Reply 'approve' to proceed or give feedback.",
+				child_ids: [],
+				branch_rules: [],
+				loop_config: null,
+				agent_config: null,
+				output_schema: null,
+			},
+			stepNode("implement", "Implement the solution", "Implement the approved design."),
+			stepNode("test", "Test the implementation", "Write and run tests validating the design."),
+		],
+		transitions: [
+			{ id: "t1", from_id: "research", to_id: "design", condition: null, label: null },
+			{ id: "t2", from_id: "design", to_id: "design_review", condition: null, label: null },
+			{ id: "t3", from_id: "design_review", to_id: "implement", condition: null, label: null },
+			{ id: "t4", from_id: "implement", to_id: "test", condition: null, label: null },
+		],
+		on_done_template_id: null,
+		on_reject_template_id: null,
+	},
+];
+
+const templatesBySlug = new Map(flowTemplates.map((t) => [t.slug, t]));
+
+function templateSummary(template) {
+	return {
+		id: template.id,
+		slug: template.slug,
+		name: template.name,
+		description: template.description,
+		initial_node_id: template.initial_node_id,
+		nodes: template.nodes,
+		transitions: template.transitions,
+		node_count: template.nodes.length,
+		transition_count: template.transitions.length,
+		on_done_template_id: template.on_done_template_id,
+		on_reject_template_id: template.on_reject_template_id,
+	};
+}
+
+/** Step records for a task's flow, derived from its template so the graph and
+ * history agree: nodes before the current one completed, the current one in
+ * flight (or all completed once the task is done). */
+function flowSteps(task, template) {
+	const nodes = template.nodes.filter(
+		(node) => node.node_type === "step" || node.node_type === "human_input",
+	);
+	const completed = task.status === "done" || task.current_node_id === null;
+	const currentIndex = task.current_node_id
+		? nodes.findIndex((node) => node.id === task.current_node_id)
+		: -1;
+	return nodes.map((node, index) => {
+		const isCurrent = !completed && index === currentIndex;
+		const done = completed || (currentIndex >= 0 && index < currentIndex);
+		const createdAt = NOW - (nodes.length - index) * 120;
+		return {
+			id: `ex-${task.id}-${node.id}`,
+			node_id: node.id,
+			status: done ? "completed" : isCurrent ? "in_progress" : "pending",
+			prompt: node.prompt,
+			output: done ? `${node.name} completed` : null,
+			transition_result: null,
+			model: done || isCurrent ? "claude-sonnet-4" : null,
+			input_tokens: done ? 1200 : 0,
+			output_tokens: done ? 220 : 0,
+			cost: done ? 0.022 : 0,
+			duration_ms: done ? 5330 : 0,
+			created_at: createdAt,
+			completed_at: done ? createdAt + 6 : null,
+		};
+	});
+}
+
+/** Execution state for a task's bound flow, or null when none is bound. */
+function flowStateForTask(task) {
+	if (!task || !task.flow_instance_id) return null;
+	const template = templatesBySlug.get(task.flow_template_id);
+	if (!template) return null;
+	const keys = flowSteps(task, template);
+	const current = task.current_node_id
+		? template.nodes.find((node) => node.id === task.current_node_id)
+		: undefined;
+	const status =
+		task.status === "done" || !current
+			? "completed"
+			: current.node_type === "human_input"
+				? "awaiting_input"
+				: "running";
+	return {
+		id: `state-${task.id}`,
+		task_id: task.id,
+		status,
+		current_node_id: task.current_node_id,
+		flow_instance: {
+			id: task.flow_instance_id,
+			template_id: template.slug,
+			task_id: task.id,
+			nodes: template.nodes,
+			transitions: template.transitions,
+			initial_node_id: template.initial_node_id,
+			on_done_template_id: template.on_done_template_id,
+			on_reject_template_id: template.on_reject_template_id,
+		},
+		step_history: keys,
+		loop_counters: {},
+		variables: {},
+	};
+}
+
+/** Terminal workflow statuses: a blocker in one of these no longer blocks. */
+function isTerminalStatus(status) {
+	return status === "done" || status === "cancelled";
+}
+
+/** A task is ready when it is neither archived nor in a terminal workflow state
+ * and every one of its blockers has reached a terminal state. */
+function isReadyTask(task) {
+	if (task.archived || isTerminalStatus(task.status)) return false;
+	const blockers = blockedBy.get(task.id);
+	if (!blockers || blockers.size === 0) return true;
+	return [...blockers].every((id) => {
+		const blocker = tasks.find((candidate) => candidate.id === id);
+		return !blocker || isTerminalStatus(blocker.status);
+	});
+}
+
+/** Incomplete blockers only — terminal blockers are filtered out (C6). */
+function incompleteBlockers(taskId) {
+	const blockers = blockedBy.get(taskId);
+	if (!blockers) return [];
+	return [...blockers]
+		.map((id) => tasks.find((candidate) => candidate.id === id))
+		.filter((task) => task && !isTerminalStatus(task.status));
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function pageItems(items, limit, beforeSequence) {
@@ -520,12 +861,129 @@ function route(req) {
 		return { status: 200, body: JSON.stringify(tasks) };
 	}
 
+	// GET /api/v1/tasks/ready — unblocked, non-terminal tasks.
+	if (req.method === "GET" && rest.length === 2 && rest[0] === "tasks" && rest[1] === "ready") {
+		return { status: 200, body: JSON.stringify(tasks.filter(isReadyTask)) };
+	}
+
+	// GET /api/v1/flow-templates — the prebuilt template registry.
+	if (req.method === "GET" && rest.length === 1 && rest[0] === "flow-templates") {
+		return {
+			status: 200,
+			body: JSON.stringify({ templates: flowTemplates.map(templateSummary) }),
+		};
+	}
+
+	// GET /api/v1/flow-templates/:id — one template by id or slug.
+	if (req.method === "GET" && rest.length === 2 && rest[0] === "flow-templates") {
+		const template =
+			templatesBySlug.get(rest[1]) ??
+			flowTemplates.find((candidate) => candidate.id === rest[1]);
+		return template
+			? { status: 200, body: JSON.stringify(templateSummary(template)) }
+			: {
+					status: 404,
+					body: errorBody("not_found", `flow template ${rest[1]}`),
+				};
+	}
+
 	// GET /api/v1/tasks/:id
 	if (req.method === "GET" && rest.length === 2 && rest[0] === "tasks") {
 		const task = tasks.find((candidate) => candidate.id === rest[1]);
 		return task
 			? { status: 200, body: JSON.stringify(task) }
 			: { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+	}
+
+	// GET /api/v1/tasks/:id/flow — the task's current flow execution state.
+	if (
+		req.method === "GET" &&
+		rest.length === 3 &&
+		rest[0] === "tasks" &&
+		rest[2] === "flow"
+	) {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		const state = flowStateForTask(task);
+		return state
+			? { status: 200, body: JSON.stringify(state) }
+			: {
+					status: 404,
+					body: errorBody("not_found", `flow for task ${rest[1]}`),
+				};
+	}
+
+	// GET /api/v1/tasks/:id/blockers — incomplete blockers only.
+	if (
+		req.method === "GET" &&
+		rest.length === 3 &&
+		rest[0] === "tasks" &&
+		rest[2] === "blockers"
+	) {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		return { status: 200, body: JSON.stringify(incompleteBlockers(task.id)) };
+	}
+
+	// POST /api/v1/tasks/:id/dependencies — add a blocker ({ depends_on }).
+	if (
+		req.method === "POST" &&
+		rest.length === 3 &&
+		rest[0] === "tasks" &&
+		rest[2] === "dependencies"
+	) {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		let data = {};
+		try {
+			data = JSON.parse(req.body || "{}");
+		} catch {
+			data = {};
+		}
+		const dependsOn = data.depends_on;
+		if (typeof dependsOn !== "string" || !tasks.some((t) => t.id === dependsOn)) {
+			return {
+				status: 422,
+				body: errorBody("invalid_dependency", `unknown task ${dependsOn}`),
+			};
+		}
+		if (dependsOn === task.id) {
+			return {
+				status: 422,
+				body: errorBody("invalid_dependency", "a task cannot block itself"),
+			};
+		}
+		const blockers = blockedBy.get(task.id) ?? new Set();
+		blockers.add(dependsOn);
+		blockedBy.set(task.id, blockers);
+		return { status: 201, body: JSON.stringify({ blocked_by: [...blockers] }) };
+	}
+
+	// DELETE /api/v1/tasks/:id/dependencies/:depends_on — remove a blocker.
+	if (
+		req.method === "DELETE" &&
+		rest.length === 4 &&
+		rest[0] === "tasks" &&
+		rest[2] === "dependencies"
+	) {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		const blockers = blockedBy.get(task.id);
+		if (!blockers || !blockers.delete(rest[3])) {
+			return {
+				status: 404,
+				body: errorBody("not_found", `dependency ${rest[3]}`),
+			};
+		}
+		return { status: 200, body: JSON.stringify({ blocked_by: [...blockers] }) };
 	}
 
 	// GET /api/v1/tasks/:id/executions
@@ -640,6 +1098,12 @@ function route(req) {
 }
 
 const server = http.createServer((req, res) => {
+	// CORS preflight: answer before routing so every cross-origin fetch works.
+	if (req.method === "OPTIONS") {
+		res.writeHead(204, { ...CORS_HEADERS, "content-length": 0 });
+		res.end();
+		return;
+	}
 	const chunks = [];
 	req.on("data", (chunk) => chunks.push(chunk));
 	req.on("end", () => {
@@ -648,6 +1112,7 @@ const server = http.createServer((req, res) => {
 		res.writeHead(status, {
 			"content-type": "application/json",
 			"content-length": Buffer.byteLength(body),
+			...CORS_HEADERS,
 		});
 		res.end(body);
 	});
