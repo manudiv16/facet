@@ -1,0 +1,31 @@
+# Sidecar configuration for Crystalline.
+#
+# This file is compiled into the Facet binary (embedded at build time) and
+# drives how the desktop app locates and starts Crystalline.
+#
+# Environment overrides:
+#   FACET_URL        -> connect to a remote instance instead of spawning (skips sidecar)
+#   CRYSTALLINE_DB   -> override the database path
+#   CRYSTALLINE_PORT -> override the preferred port
+
+[sidecar]
+# Binary name without the platform suffix. The file on disk must be named
+# `{binary_name}-{target-triple}` (e.g. `crystalline-aarch64-apple-darwin`)
+# and live in `src-tauri/binaries/` before `tauri build`.
+binary_name = "crystalline"
+
+# Preferred HTTP port. If it is already in use, a random free port is chosen.
+default_port = 8787
+
+# Fallback database path. On macOS the app resolves `dirs::data_dir()` to
+# `~/Library/Application Support`, producing the canonical
+# `~/Library/Application Support/Facet/crystalline.db`.
+default_db_path = "~/Library/Application Support/Facet/crystalline.db"
+
+[health]
+# Endpoint polled to detect readiness.
+path = "/health"
+# Maximum time to wait for the sidecar to become healthy (seconds).
+timeout_secs = 30
+# Delay between polls (milliseconds).
+poll_interval_ms = 500

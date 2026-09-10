@@ -24,7 +24,7 @@ Scaffolded — awaiting implementation.
 Work is tracked as dependency-linked issues:
 
 | # | Task | Blocked by |
-|---|---|---|
+| --- | --- | --- |
 | [#1](https://github.com/manudiv16/facet/issues/1) | HTTP client + shared domain models | crystalline#5 |
 | [#2](https://github.com/manudiv16/facet/issues/2) | CLI surface: tasks, flows, executions | #1 |
 | [#3](https://github.com/manudiv16/facet/issues/3) | Tauri shell: sidecar packaging | #1 |
@@ -34,16 +34,41 @@ Work is tracked as dependency-linked issues:
 
 ## Development
 
+### CLI
+
 ```sh
 gleam run   # Run the CLI
 gleam test  # Run the tests
 gleam build # Compile
 ```
 
+### Desktop (Tauri)
+
+The desktop shell lives in `desktop/` (SvelteKit/Vite frontend + Rust Tauri app in
+`desktop/src-tauri/`). It spawns the Crystalline binary as a sidecar and talks to it over
+localhost HTTP.
+
+The sidecar is discovered at `desktop/src-tauri/binaries/crystalline-<target-triple>`.
+Build the real binary with `scripts/build.sh` (requires a Crystalline checkout) or install
+the development stub with `scripts/dev-sidecar.sh` and run `scripts/build.sh --stub`:
+
+```sh
+scripts/dev-sidecar.sh   # install the stub under the platform-suffixed name
+cd desktop && cargo tauri dev   # develop: sidecar + hot-reloading UI
+scripts/build.sh --stub  # or with a real binary: scripts/build.sh
+# Artifacts land in desktop/src-tauri/target/release/bundle/macos (or -windows/)…
+```
+
+`cargo tauri dev` and the bundled app expect `desktop/src-tauri/sidecar.toml`-compiled
+values (binary name, preferred port, DB path). On macOS the database defaults to
+`~/Library/Application Support/Facet/crystalline.db`.
+
 | Variable | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `FACET_URL` | `http://localhost:8787` | Crystalline base URL; when set, no sidecar is spawned |
 | `FACET_TOKEN` | — | Bearer token for a remote instance |
+| `CRYSTALLINE_PORT` | `8787` | Preferred sidecar port (a random free port is used if taken) |
+| `CRYSTALLINE_DB` | *platform data dir* | Override the sidecar database path |
 
 ## Related
 

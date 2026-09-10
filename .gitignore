@@ -2,3 +2,15 @@
 *.ez
 /build
 erl_crash.dump
+
+# ── Desktop (SvelteKit + Tauri) ────────────────────────────────────────────
+node_modules/
+desktop/.svelte-kit/
+desktop/build/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# Crystalline sidecar binaries are produced by scripts/build.sh
+desktop/src-tauri/binaries/*
+!desktop/src-tauri/binaries/.gitkeep
