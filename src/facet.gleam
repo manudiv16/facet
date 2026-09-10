@@ -1,5 +1,5 @@
-import gleam/io
+import facet_cli
 
 pub fn main() -> Nil {
-  io.println("Hello from facet!")
+  facet_cli.main()
 }

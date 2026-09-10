@@ -19,7 +19,9 @@ Identical code in both modes; only the base URL changes.
 
 ## Status
 
-Scaffolded — awaiting implementation.
+- **#1 HTTP client + shared domain models** — implemented (`src/facet/client.gleam`, `src/facet/models.gleam`).
+- **#2 CLI surface** — implemented (`src/facet_cli.gleam`, `src/facet/cli/`).
+- **#3+ Tauri shell and UI** — pending.
 
 Work is tracked as dependency-linked issues:
 
@@ -41,6 +43,32 @@ gleam run   # Run the CLI
 gleam test  # Run the tests
 gleam build # Compile
 ```
+
+Command reference:
+
+```
+facet [--url <base-url>] [--token <token>] [--json] <command> [args...]
+
+facet health
+facet task add <title> [--level epic|ticket|task] [--priority low|medium|high|critical] [--tag <t>]
+facet task list [--ready] [--status <s>] [--limit <n>] [--offset <n>]
+facet task show <id> | update <id> [--flags] | delete <id> [--cascade]
+facet task depend <id> <depends-on> | undepend <id> <depends-on> | blockers <id>
+facet flow templates         # or: flow templates show <id>
+facet flow start <task-id> <template-id>
+facet flow status <instance-id>
+facet flow advance <instance-id>            # prints the engine Action
+facet flow complete-step <inst> <step> --output "<result>"
+facet flow input <instance-id> "<text>"
+facet flow reject <instance-id> [--reason "..."]
+facet exec history <task-id> | show <exec-id> | active
+facet exec logs <exec-id> [--limit N] [--before SEQ]
+```
+
+- `--ready` lists only unblocked tasks (`/tasks/ready`); `--json` switches to machine-readable output.
+- Flow commands implement the human-in-the-loop loop: `advance` prints the action and the next command to run.
+- `exec logs` pages newest-first; when a page fills up it suggests `--before <oldest sequence>` to continue.
+- Errors go to stderr as `facet: <message>` with exit status 1; success (and `--help`) exit 0.
 
 ### Desktop (Tauri)
 
