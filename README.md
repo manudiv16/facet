@@ -91,6 +91,17 @@ scripts/build.sh --stub  # or with a real binary: scripts/build.sh
 values (binary name, preferred port, DB path). On macOS the database defaults to
 `~/Library/Application Support/Facet/crystalline.db`.
 
+#### Provider API keys
+
+The Settings screen (`/settings` in the sidebar) is the credential entry point for the
+embedded engine: keys for Anthropic, OpenAI, Google, Groq, Mistral and OpenRouter can be
+added, replaced, or removed there. Keys are stored in the OS keychain (macOS Keychain,
+Windows Credential Manager, or the Linux Secret Service) — never in config files, the app
+bundle, or logs — and the app only ever reads back which providers are configured, never
+key values. When the embedded sidecar spawns, each configured key is forwarded as its
+conventional environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Remote mode
+(`FACET_URL`) never receives them: a remote instance manages its own credentials.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FACET_URL` | `http://localhost:8787` | Crystalline base URL; when set, no sidecar is spawned |
