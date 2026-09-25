@@ -45,14 +45,44 @@ export function isTauri(): boolean {
 	);
 }
 
-/** Base URL used by the API client, or `null` while the backend is not ready. */
-export function getBaseUrl(): string | null {
+// Resolve once the backend has resolved (or failed to resolve) a base URL.
+// Components fire their data loads from `onMount`, which races the async
+// `initBackend()` bootstrap; awaiting this prevents "not connected yet" errors
+// during startup.
+const settleBackend = { resolve: null as ((url: string | null) => void) | null };
+const waitForBackend = new Promise<string | null>((resolve) => {
+	settleBackend.resolve = resolve;
+});
+
+function notifyIfResolved(): void {
 	const status = get(backend);
-	if (status.base_url) {
-		return status.state === "error" ? null : status.base_url.replace(/\/$/, "");
+	if (status.state === "error") {
+		// Matches the removed `getBaseUrl()`: an errored backend never hands out a
+		// (possibly stale) URL, even if one is still recorded on the status.
+		settleBackend.resolve?.(null);
+	} else if (status.base_url) {
+		settleBackend.resolve?.(status.base_url.replace(/\/$/, ""));
+	} else {
+		// Still `starting`: keep waiting for the bootstrap transition.
+		return;
 	}
-	// Browser fallback (no Tauri runtime).
-	return isTauri() ? null : BROWSER_FALLBACK_URL;
+	settleBackend.resolve = null;
+}
+
+let watchingBackend = false;
+function watchBackend(): void {
+	if (watchingBackend) return;
+	watchingBackend = true;
+	// svelte only notifies on change: check the current value immediately and
+	// then subscribe for the bootstrap transition (starting -> ready/error).
+	notifyIfResolved();
+	backend.subscribe(() => notifyIfResolved());
+}
+
+/** Resolve the backend URL once available; `null` when the backend errored. */
+export function resolveBaseUrl(): Promise<string | null> {
+	watchBackend();
+	return waitForBackend;
 }
 
 let started = false;

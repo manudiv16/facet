@@ -1,5 +1,5 @@
 // API client for Crystalline backend
-import { getBaseUrl } from "./backend";
+import { resolveBaseUrl } from "./backend";
 
 export interface ApiError {
 	message: string;
@@ -10,7 +10,9 @@ async function request<T>(
 	endpoint: string,
 	options: RequestInit = {},
 ): Promise<T> {
-	const base = getBaseUrl();
+	// Await backend resolution so page `onMount` loads fired before the
+	// `initBackend()` bootstrap finished still reach the sidecar/remote URL.
+	const base = await resolveBaseUrl();
 	if (!base) {
 		throw {
 			message: "Crystalline is not connected yet",
