@@ -8,12 +8,14 @@ import gleam/option.{type Option}
 
 // ─── Parsed invocation ─────────────────────────────────────────────────────
 
-/// A fully parsed command line. `url`/`token`/`json` are the global options
-/// that may appear before the command; they override the environment.
+/// A fully parsed command line. `url`/`token`/`project`/`json` are the global
+/// options that may appear before the command; they override the environment
+/// (and, for `project`, the persisted config file).
 pub type ParsedInvocation {
   ParsedInvocation(
     url: Option(String),
     token: Option(String),
+    project: Option(String),
     json: Bool,
     command: Command,
   )
@@ -27,6 +29,13 @@ pub type Command {
   Health
   /// `--help` / `-h` / `help`
   Help
+  /// `init <slug> [--name <name>]` — resolve or create the project and
+  /// persist it as the client default.
+  Init(InitArgs)
+  /// `path <task-id>` — the task's ancestor chain root→task.
+  Path(task_id: String)
+  /// `stop <instance-id>` — cancel a running flow instance.
+  Stop(instance_id: String)
   TaskAdd(TaskAddArgs)
   TaskList(TaskListArgs)
   TaskShow(id: String)
@@ -37,6 +46,15 @@ pub type Command {
   TaskBlockers(id: String)
   TaskSections(id: String)
   TaskSectionAdd(id: String, args: TaskSectionAddArgs)
+  /// `task ref <task-id> <path> [flags]` — create a section carrying a code
+  /// reference.
+  TaskRef(task_id: String, args: TaskRefArgs)
+  /// `task unref <task-id> <section-id>` — clear a section's code reference.
+  TaskUnref(task_id: String, section_id: String)
+  ArtifactGet(task_id: String, logical_name: String)
+  ArtifactPut(task_id: String, logical_name: String, content: ContentSource)
+  ArtifactList(task_id: String)
+  ArtifactDelete(task_id: String, logical_name: String)
   FlowTemplates
   FlowTemplateShow(id: String)
   FlowStart(task_id: String, template_id: String)
@@ -93,12 +111,43 @@ pub type TaskSectionAddArgs {
   TaskSectionAddArgs(section_type: models.SectionType, content: String)
 }
 
+/// Arguments of `init`: the project slug to resolve or create, and an optional
+/// display name used only when the project has to be created.
+pub type InitArgs {
+  InitArgs(slug: String, name: Option(String))
+}
+
+/// Arguments of `task ref`. `content` defaults to the code path and
+/// `section_type` to `context`: a code reference is a section field, so `ref`
+/// creates a section to hold it.
+pub type TaskRefArgs {
+  TaskRefArgs(
+    code_path: String,
+    line_start: Option(Int),
+    line_end: Option(Int),
+    name: Option(String),
+    description: Option(String),
+    section_type: models.SectionType,
+    content: String,
+  )
+}
+
+/// Where `artifact put` reads its JSON body from: an inline argument or stdin
+/// (`--content -`).
+pub type ContentSource {
+  InlineContent(String)
+  StdinContent
+}
+
 // ─── Structured outputs ────────────────────────────────────────────────────
 
 /// The structured result of running a command. Rendering turns this into
 /// either human-readable text or JSON; tests assert on it directly.
 pub type Output {
   HealthOutput(health: models.HealthStatus)
+  ProjectInitialized(project: models.Project, config_path: String)
+  TaskPathShown(task_id: String, path: List(models.Task))
+  FlowCancelled(instance_id: String, state: models.ExecutionState)
   TaskCreated(task: models.Task)
   TaskListOutput(tasks: List(models.Task))
   TaskShown(task: models.Task)
@@ -109,6 +158,12 @@ pub type Output {
   BlockersShown(task_id: String, blockers: List(models.Task))
   SectionsShown(task_id: String, sections: List(models.Section))
   SectionCreated(section: models.Section)
+  CodeRefAdded(section: models.Section)
+  CodeRefCleared(section_id: String, section: models.Section)
+  ArtifactsListed(task_id: String, artifacts: List(models.Artifact))
+  ArtifactShown(artifact: models.Artifact)
+  ArtifactStored(artifact: models.Artifact)
+  ArtifactDeleted(task_id: String, logical_name: String)
   TemplatesListed(templates: List(models.FlowTemplate))
   TemplateShown(template: models.FlowTemplate)
   FlowStarted(instance: models.FlowInstance, task_id: String)
