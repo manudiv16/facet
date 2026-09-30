@@ -279,6 +279,146 @@ pub fn node_type_decoder() -> decode.Decoder(NodeType) {
   decode_node_type()
 }
 
+// ─── Projects ───────────────────────────────────────────────────────────────
+
+/// A workspace. Tasks, sections and the artifact list are scoped to one
+/// project through the `X-Crystalline-Project` header, which accepts a
+/// project id or slug.
+pub type Project {
+  Project(
+    id: String,
+    slug: String,
+    name: String,
+    description: String,
+    created_at: Int,
+    updated_at: Int,
+  )
+}
+
+pub fn encode_project(project: Project) -> json.Json {
+  json.object([
+    #("id", json.string(project.id)),
+    #("slug", json.string(project.slug)),
+    #("name", json.string(project.name)),
+    #("description", json.string(project.description)),
+    #("created_at", json.int(project.created_at)),
+    #("updated_at", json.int(project.updated_at)),
+  ])
+}
+
+pub fn decode_project() -> decode.Decoder(Project) {
+  use id <- decode.field("id", decode.string)
+  use slug <- decode.field("slug", decode.string)
+  use name <- decode.optional_field("name", "", decode.string)
+  use description <- decode.optional_field("description", "", decode.string)
+  use created_at <- decode.optional_field("created_at", 0, decode.int)
+  use updated_at <- decode.optional_field("updated_at", 0, decode.int)
+  decode.success(Project(
+    id:,
+    slug:,
+    name:,
+    description:,
+    created_at:,
+    updated_at:,
+  ))
+}
+
+pub fn project_decoder() -> decode.Decoder(Project) {
+  decode_project()
+}
+
+/// Body for `POST /api/v1/projects`.
+pub type ProjectCreate {
+  ProjectCreate(slug: String, name: String)
+}
+
+pub fn encode_project_create(body: ProjectCreate) -> json.Json {
+  json.object([
+    #("slug", json.string(body.slug)),
+    #("name", json.string(body.name)),
+  ])
+}
+
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+
+/// A JSON document stored under a task-scoped logical name. The content is
+/// arbitrary JSON and round-trips unchanged.
+pub type Artifact {
+  Artifact(
+    id: String,
+    task_id: String,
+    logical_name: String,
+    content: json.Json,
+    created_at: Int,
+    updated_at: Int,
+  )
+}
+
+pub fn encode_artifact(artifact: Artifact) -> json.Json {
+  json.object([
+    #("id", json.string(artifact.id)),
+    #("task_id", json.string(artifact.task_id)),
+    #("logical_name", json.string(artifact.logical_name)),
+    #("content", artifact.content),
+    #("created_at", json.int(artifact.created_at)),
+    #("updated_at", json.int(artifact.updated_at)),
+  ])
+}
+
+pub fn decode_artifact() -> decode.Decoder(Artifact) {
+  use id <- decode.field("id", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use logical_name <- decode.optional_field("logical_name", "", decode.string)
+  use content <- decode.field("content", json_value_decoder())
+  use created_at <- decode.optional_field("created_at", 0, decode.int)
+  use updated_at <- decode.optional_field("updated_at", 0, decode.int)
+  decode.success(Artifact(
+    id:,
+    task_id:,
+    logical_name:,
+    content:,
+    created_at:,
+    updated_at:,
+  ))
+}
+
+pub fn artifact_decoder() -> decode.Decoder(Artifact) {
+  decode_artifact()
+}
+
+/// Body for `PUT /api/v1/tasks/:task_id/artifacts/:logical_name`.
+pub type ArtifactPut {
+  ArtifactPut(content: json.Json)
+}
+
+pub fn encode_artifact_put(body: ArtifactPut) -> json.Json {
+  json.object([#("content", body.content)])
+}
+
+/// Decode any JSON value — string, number, bool, null, array or object —
+/// into `gleam/json`'s `Json` so it can be re-emitted unchanged.
+pub fn json_value_decoder() -> decode.Decoder(json.Json) {
+  use <- decode.recursive
+  decode.one_of(decode.string |> decode.map(json.string), [
+    decode.int |> decode.map(json.int),
+    decode.float |> decode.map(json.float),
+    decode.bool |> decode.map(json.bool),
+    decode.list(json_value_decoder())
+      |> decode.map(fn(values) { json.array(values, fn(value) { value }) }),
+    decode.dict(decode.string, json_value_decoder())
+      |> decode.map(fn(values) {
+        json.dict(values, fn(key) { key }, fn(value) { value })
+      }),
+    decode.optional(decode.string)
+      |> decode.map(fn(value) {
+        case value {
+          Some(text) -> json.string(text)
+          None -> json.null()
+        }
+      }),
+  ])
+}
+
 // ─── Flow models ────────────────────────────────────────────────────────────
 
 pub type BranchRule {
@@ -561,7 +701,7 @@ pub fn encode_flow_template(template: FlowTemplate) -> json.Json {
     #("name", json.string(template.name)),
     #("description", json.string(template.description)),
     #("initial_node_id", json.string(template.initial_node_id)),
-    #("nodes", encode_node_dict(template.nodes)),
+    #("nodes", encode_nodes(template.nodes)),
     #("transitions", json.array(template.transitions, encode_flow_transition)),
     #(
       "on_done_template_id",
@@ -583,11 +723,7 @@ pub fn decode_flow_template() -> decode.Decoder(FlowTemplate) {
     "",
     decode.string,
   )
-  use nodes <- decode.optional_field(
-    "nodes",
-    dict.new(),
-    decode.dict(decode.string, decode_flow_node()),
-  )
+  use nodes <- decode.optional_field("nodes", dict.new(), decode_nodes())
   use transitions <- decode.optional_field(
     "transitions",
     [],
@@ -637,7 +773,7 @@ pub fn encode_flow_instance(instance: FlowInstance) -> json.Json {
     #("id", json.string(instance.id)),
     #("template_id", json.string(instance.template_id)),
     #("task_id", json.string(instance.task_id)),
-    #("nodes", encode_node_dict(instance.nodes)),
+    #("nodes", encode_nodes(instance.nodes)),
     #("transitions", json.array(instance.transitions, encode_flow_transition)),
     #("initial_node_id", json.string(instance.initial_node_id)),
     #(
@@ -655,11 +791,7 @@ pub fn decode_flow_instance() -> decode.Decoder(FlowInstance) {
   use id <- decode.field("id", decode.string)
   use template_id <- decode.optional_field("template_id", "", decode.string)
   use task_id <- decode.optional_field("task_id", "", decode.string)
-  use nodes <- decode.optional_field(
-    "nodes",
-    dict.new(),
-    decode.dict(decode.string, decode_flow_node()),
-  )
+  use nodes <- decode.optional_field("nodes", dict.new(), decode_nodes())
   use transitions <- decode.optional_field(
     "transitions",
     [],
@@ -799,6 +931,175 @@ pub fn decode_task() -> decode.Decoder(Task) {
 
 pub fn task_decoder() -> decode.Decoder(Task) {
   decode_task()
+}
+
+/// `GET /api/v1/tasks/:id/path` answers `{"path": [root, …, task]}`; this
+/// yields the ordered ancestor chain root-first.
+pub fn decode_task_path() -> decode.Decoder(List(Task)) {
+  use path <- decode.field("path", decode.list(decode_task()))
+  decode.success(path)
+}
+
+pub fn task_path_decoder() -> decode.Decoder(List(Task)) {
+  decode_task_path()
+}
+
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+/// The role a section plays in a task's description. Mirrors the
+/// `section_type` column of Crystalline's sections table (crystalline#16).
+pub type SectionType {
+  Goal
+  Context
+  CurrentBehavior
+  DesiredBehavior
+  ChecklistItem
+  TestingCriterion
+  Constraint
+  AntiPattern
+  FailureTest
+}
+
+pub fn section_type_to_string(section_type: SectionType) -> String {
+  case section_type {
+    Goal -> "goal"
+    Context -> "context"
+    CurrentBehavior -> "current_behavior"
+    DesiredBehavior -> "desired_behavior"
+    ChecklistItem -> "checklist_item"
+    TestingCriterion -> "testing_criterion"
+    Constraint -> "constraint"
+    AntiPattern -> "anti_pattern"
+    FailureTest -> "failure_test"
+  }
+}
+
+pub fn section_type_from_string(value: String) -> Result(SectionType, String) {
+  case value {
+    "goal" -> Ok(Goal)
+    "context" -> Ok(Context)
+    "current_behavior" -> Ok(CurrentBehavior)
+    "desired_behavior" -> Ok(DesiredBehavior)
+    "checklist_item" -> Ok(ChecklistItem)
+    "testing_criterion" -> Ok(TestingCriterion)
+    "constraint" -> Ok(Constraint)
+    "anti_pattern" -> Ok(AntiPattern)
+    "failure_test" -> Ok(FailureTest)
+    _ -> Error(value)
+  }
+}
+
+pub fn encode_section_type(section_type: SectionType) -> json.Json {
+  json.string(section_type_to_string(section_type))
+}
+
+pub fn decode_section_type() -> decode.Decoder(SectionType) {
+  strict_enum(section_type_from_string, Goal, "SectionType")
+}
+
+pub fn section_type_decoder() -> decode.Decoder(SectionType) {
+  decode_section_type()
+}
+
+/// A file reference attached to a section: the section is the entity, and a
+/// code reference is one of its fields (there is no separate code-ref
+/// resource in the engine).
+pub type CodeRef {
+  CodeRef(
+    path: String,
+    line_start: Option(Int),
+    line_end: Option(Int),
+    name: Option(String),
+    description: Option(String),
+  )
+}
+
+pub fn encode_code_ref(code_ref: CodeRef) -> json.Json {
+  json.object([
+    #("path", json.string(code_ref.path)),
+    #("line_start", json.nullable(code_ref.line_start, json.int)),
+    #("line_end", json.nullable(code_ref.line_end, json.int)),
+    #("name", json.nullable(code_ref.name, json.string)),
+    #("description", json.nullable(code_ref.description, json.string)),
+  ])
+}
+
+pub fn decode_code_ref() -> decode.Decoder(CodeRef) {
+  use path <- decode.field("path", decode.string)
+  use line_start <- decode.optional_field(
+    "line_start",
+    None,
+    decode.optional(decode.int),
+  )
+  use line_end <- decode.optional_field(
+    "line_end",
+    None,
+    decode.optional(decode.int),
+  )
+  use name <- decode.optional_field(
+    "name",
+    None,
+    decode.optional(decode.string),
+  )
+  use description <- decode.optional_field(
+    "description",
+    None,
+    decode.optional(decode.string),
+  )
+  decode.success(CodeRef(path:, line_start:, line_end:, name:, description:))
+}
+
+pub fn code_ref_decoder() -> decode.Decoder(CodeRef) {
+  decode_code_ref()
+}
+
+/// A structured part of a task's description. `code_ref` is `None` when the
+/// section carries prose only.
+pub type Section {
+  Section(
+    id: String,
+    task_id: String,
+    section_type: SectionType,
+    content: String,
+    code_ref: Option(CodeRef),
+    order: Int,
+  )
+}
+
+pub fn encode_section(section: Section) -> json.Json {
+  json.object([
+    #("id", json.string(section.id)),
+    #("task_id", json.string(section.task_id)),
+    #("section_type", encode_section_type(section.section_type)),
+    #("content", json.string(section.content)),
+    #("code_ref", json.nullable(section.code_ref, encode_code_ref)),
+    #("order", json.int(section.order)),
+  ])
+}
+
+pub fn decode_section() -> decode.Decoder(Section) {
+  use id <- decode.field("id", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use section_type <- decode.field("section_type", decode_section_type())
+  use content <- decode.optional_field("content", "", decode.string)
+  use code_ref <- decode.optional_field(
+    "code_ref",
+    None,
+    decode.optional(decode_code_ref()),
+  )
+  use order <- decode.optional_field("order", 0, decode.int)
+  decode.success(Section(
+    id:,
+    task_id:,
+    section_type:,
+    content:,
+    code_ref:,
+    order:,
+  ))
+}
+
+pub fn section_decoder() -> decode.Decoder(Section) {
+  decode_section()
 }
 
 // ─── Execution models ───────────────────────────────────────────────────────
@@ -1071,7 +1372,8 @@ pub fn session_log_decoder() -> decode.Decoder(SessionLog) {
 // ─── Engine action ──────────────────────────────────────────────────────────
 
 /// The engine action returned by `advance`. Mirrors Crystalline's
-/// `flow/executor.Action`.
+/// `flow/executor.Action`; the engine tags it with a `type` field
+/// (`action_body/1`), which is what `decode_action` reads.
 pub type Action {
   RunStep(node: FlowNode, prompt: String)
   AwaitInput(node: FlowNode)
@@ -1085,37 +1387,33 @@ pub fn encode_action(action: Action) -> json.Json {
   case action {
     RunStep(node:, prompt:) ->
       json.object([
-        #("kind", json.string("run_step")),
+        #("type", json.string("run_step")),
         #("node", encode_flow_node(node)),
         #("prompt", json.string(prompt)),
       ])
     AwaitInput(node:) ->
       json.object([
-        #("kind", json.string("await_input")),
+        #("type", json.string("await_input")),
         #("node", encode_flow_node(node)),
       ])
     RunParallel(children:) ->
       json.object([
-        #("kind", json.string("run_parallel")),
+        #("type", json.string("run_parallel")),
         #("children", json.array(children, encode_flow_node)),
       ])
-    FlowComplete -> json.object([#("kind", json.string("flow_complete"))])
-    FlowReject -> json.object([#("kind", json.string("flow_reject"))])
+    FlowComplete -> json.object([#("type", json.string("flow_complete"))])
+    FlowReject -> json.object([#("type", json.string("flow_reject"))])
     ExecutionError(message:) ->
       json.object([
-        #("kind", json.string("execution_error")),
+        #("type", json.string("execution_error")),
         #("message", json.string(message)),
       ])
   }
 }
 
 pub fn decode_action() -> decode.Decoder(Action) {
-  use kind <- decode.then(
-    decode.one_of(decode.field("kind", decode.string, decode.success), [
-      decode.field("type", decode.string, decode.success),
-    ]),
-  )
-  case kind {
+  use action_type <- decode.field("type", decode.string)
+  case action_type {
     "run_step" -> {
       use node <- decode.field("node", decode_flow_node())
       use prompt <- decode.optional_field("prompt", "", decode.string)
@@ -1139,12 +1437,130 @@ pub fn decode_action() -> decode.Decoder(Action) {
       use message <- decode.field("message", decode.string)
       decode.success(ExecutionError(message:))
     }
-    _ -> decode.failure(ExecutionError("unknown action: " <> kind), "Action")
+    _ ->
+      decode.failure(
+        ExecutionError("unknown action: " <> action_type),
+        "Action",
+      )
   }
 }
 
 pub fn action_decoder() -> decode.Decoder(Action) {
   decode_action()
+}
+
+// ─── Engine execution envelopes ─────────────────────────────────────────────
+
+/// The engine's execution-state summary — `execution_body/1` in Crystalline's
+/// `http/routes/flows.gleam`. Every execution-control route answers with it:
+/// under `"execution"` in the `{"execution","action"}` step envelopes, and
+/// bare from `POST /flows/:instance_id/cancel`. It carries identity, status
+/// and timestamps but neither the step history nor the flow graph — that is
+/// `ExecutionState`, the heavier shape the read-side routes return.
+pub type ExecutionSummary {
+  ExecutionSummary(
+    id: String,
+    instance_id: String,
+    task_id: String,
+    status: ExecutionStatus,
+    current_node_id: Option(String),
+    started_at: Option(Int),
+    completed_at: Option(Int),
+  )
+}
+
+pub fn encode_execution_summary(summary: ExecutionSummary) -> json.Json {
+  json.object([
+    #("id", json.string(summary.id)),
+    #("instance_id", json.string(summary.instance_id)),
+    #("task_id", json.string(summary.task_id)),
+    #("status", encode_execution_status(summary.status)),
+    #("current_node_id", json.nullable(summary.current_node_id, json.string)),
+    #("started_at", json.nullable(summary.started_at, json.int)),
+    #("completed_at", json.nullable(summary.completed_at, json.int)),
+  ])
+}
+
+pub fn decode_execution_summary() -> decode.Decoder(ExecutionSummary) {
+  use id <- decode.field("id", decode.string)
+  use instance_id <- decode.optional_field("instance_id", "", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use status <- decode.field("status", decode_execution_status())
+  use current_node_id <- decode.optional_field(
+    "current_node_id",
+    None,
+    decode.optional(decode.string),
+  )
+  use started_at <- decode.optional_field(
+    "started_at",
+    None,
+    decode.optional(decode.int),
+  )
+  use completed_at <- decode.optional_field(
+    "completed_at",
+    None,
+    decode.optional(decode.int),
+  )
+  decode.success(ExecutionSummary(
+    id:,
+    instance_id:,
+    task_id:,
+    status:,
+    current_node_id:,
+    started_at:,
+    completed_at:,
+  ))
+}
+
+pub fn execution_summary_decoder() -> decode.Decoder(ExecutionSummary) {
+  decode_execution_summary()
+}
+
+/// `POST /api/v1/tasks/:task_id/flow` (201): the new instance plus the
+/// `pending` execution created for it.
+pub type FlowInstantiation {
+  FlowInstantiation(instance: FlowInstance, execution: ExecutionSummary)
+}
+
+pub fn encode_flow_instantiation(started: FlowInstantiation) -> json.Json {
+  json.object([
+    #("instance", encode_flow_instance(started.instance)),
+    #("execution", encode_execution_summary(started.execution)),
+  ])
+}
+
+pub fn decode_flow_instantiation() -> decode.Decoder(FlowInstantiation) {
+  use instance <- decode.field("instance", decode_flow_instance())
+  use execution <- decode.field("execution", decode_execution_summary())
+  decode.success(FlowInstantiation(instance:, execution:))
+}
+
+pub fn flow_instantiation_decoder() -> decode.Decoder(FlowInstantiation) {
+  decode_flow_instantiation()
+}
+
+/// The `{"execution","action"}` envelope every execution-control route
+/// answers with (`execution_step_body/2`): the state after driving the flow
+/// one step, plus the action to perform next.
+pub type ExecutionStep {
+  ExecutionStep(execution: ExecutionSummary, action: Action)
+}
+
+pub fn encode_execution_step(step: ExecutionStep) -> json.Json {
+  json.object([
+    #("execution", encode_execution_summary(step.execution)),
+    #("action", encode_action(step.action)),
+  ])
+}
+
+pub fn decode_execution_step() -> decode.Decoder(ExecutionStep) {
+  use execution <- decode.field("execution", decode_execution_summary())
+  use action <- decode.field("action", decode_action())
+  decode.success(ExecutionStep(execution:, action:))
+}
+
+pub fn execution_step_decoder() -> decode.Decoder(ExecutionStep) {
+  decode_execution_step()
 }
 
 // ─── Health ─────────────────────────────────────────────────────────────────
@@ -1311,6 +1727,34 @@ pub fn task_filters_to_query(filters: TaskFilters) -> List(#(String, String)) {
   params
 }
 
+/// Body for `POST /api/v1/tasks/:id/sections` — the type, text and optional
+/// code reference of the new section; the engine assigns `id`, `task_id` and
+/// `order`. `code_ref` is omitted (not sent as null) when absent.
+pub type SectionCreate {
+  SectionCreate(
+    section_type: SectionType,
+    content: String,
+    code_ref: Option(CodeRef),
+  )
+}
+
+pub fn encode_section_create(body: SectionCreate) -> json.Json {
+  let entries = [
+    #("section_type", encode_section_type(body.section_type)),
+    #("content", json.string(body.content)),
+  ]
+  json.object(case body.code_ref {
+    None -> entries
+    Some(code_ref) -> [#("code_ref", encode_code_ref(code_ref)), ..entries]
+  })
+}
+
+/// Body for `PATCH /api/v1/sections/:id` clearing a section's code reference:
+/// `{"code_ref": null}` is the engine's way of detaching it.
+pub fn encode_code_ref_clear() -> json.Json {
+  json.object([#("code_ref", json.null())])
+}
+
 pub type StartFlowRequest {
   StartFlowRequest(template_id: String)
 }
@@ -1401,11 +1845,23 @@ fn decode_float() -> decode.Decoder(Float) {
   decode.one_of(decode.float, [decode.map(decode.int, int.to_float)])
 }
 
-fn encode_node_dict(nodes: Dict(String, FlowNode)) -> json.Json {
+/// Serialise a node graph the way the engine does: a JSON **array** of node
+/// objects (each carrying its own `id`), not a keyed object. Callers keep the
+/// graph keyed by node id; only the wire form is an array.
+fn encode_nodes(nodes: Dict(String, FlowNode)) -> json.Json {
   nodes
   |> dict.to_list
-  |> list.map(fn(pair) { #(pair.0, encode_flow_node(pair.1)) })
-  |> json.object
+  |> list.map(fn(pair) { encode_flow_node(pair.1) })
+  |> json.array(fn(node) { node })
+}
+
+/// Decode the engine's node array back into a dict keyed by `node.id`.
+fn decode_nodes() -> decode.Decoder(Dict(String, FlowNode)) {
+  decode_flow_node()
+  |> decode.list
+  |> decode.map(fn(nodes) {
+    dict.from_list(list.map(nodes, fn(node) { #(node.id, node) }))
+  })
 }
 
 fn encode_int_dict(values: Dict(String, Int)) -> List(#(String, json.Json)) {

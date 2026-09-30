@@ -11,6 +11,7 @@
 		{ href: "/tasks", label: "Tasks", icon: "✓" },
 		{ href: "/flows", label: "Flows", icon: "⌥" },
 		{ href: "/executions", label: "Executions", icon: "▶" },
+		{ href: "/settings", label: "Settings", icon: "⚙" },
 	];
 
 	onMount(() => {

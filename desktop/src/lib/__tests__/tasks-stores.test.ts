@@ -5,7 +5,7 @@
 // message — including the C6 cycle rejection.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { Task } from "../types";
+import type { Artifact, Section, Task } from "../types";
 import { defaultTaskFilters } from "../tasks-utils";
 
 const apiMocks = vi.hoisted(() => ({
@@ -13,7 +13,6 @@ const apiMocks = vi.hoisted(() => ({
 	listReadyTasks: vi.fn(),
 	getTask: vi.fn(),
 	getBlockers: vi.fn(),
-	listSections: vi.fn(),
 	createTask: vi.fn(),
 	updateTask: vi.fn(),
 	archiveTask: vi.fn(),
@@ -21,7 +20,32 @@ const apiMocks = vi.hoisted(() => ({
 	removeDependency: vi.fn(),
 }));
 
+const sectionsMocks = vi.hoisted(() => ({
+	listSections: vi.fn(),
+	createSection: vi.fn(),
+	updateSection: vi.fn(),
+	deleteSection: vi.fn(),
+	sortSections: vi.fn((sections: Section[]) => [...sections]),
+}));
+
+const artifactsMocks = vi.hoisted(() => ({
+	listArtifacts: vi.fn(),
+	putArtifact: vi.fn(),
+	deleteArtifact: vi.fn(),
+	sortArtifacts: vi.fn((artifacts: Artifact[]) =>
+		[...artifacts].sort((a, b) =>
+			a.logical_name < b.logical_name
+				? -1
+				: a.logical_name > b.logical_name
+					? 1
+					: 0,
+		),
+	),
+}));
+
 vi.mock("$lib/tasks-api", () => apiMocks);
+vi.mock("$lib/sections-api", () => sectionsMocks);
+vi.mock("$lib/artifacts-api", () => artifactsMocks);
 
 import {
 	archiveTaskOptimistic,
@@ -40,6 +64,7 @@ import {
 	taskRows,
 	tasks,
 	updateTaskOptimistic,
+	type TaskDetailStore,
 } from "$stores/tasks";
 
 function makeTask(overrides: Partial<Task> & { id: string }): Task {
@@ -60,10 +85,34 @@ function makeTask(overrides: Partial<Task> & { id: string }): Task {
 	};
 }
 
+function makeSection(overrides: Partial<Section> & { id: string }): Section {
+	return {
+		task_id: "t-1",
+		section_type: "goal",
+		content: "Section " + overrides.id,
+		code_ref: null,
+		order: 0,
+		checklist_state: null,
+		...overrides,
+	};
+}
+
+function makeArtifact(overrides: Partial<Artifact> & { id: string }): Artifact {
+	return {
+		task_id: "t-1",
+		logical_name: overrides.id,
+		content: null,
+		created_at: 1_700_000_000,
+		updated_at: 1_700_000_000,
+		...overrides,
+	};
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	apiMocks.listReadyTasks.mockResolvedValue([]);
-	apiMocks.listSections.mockRejectedValue(new Error("not found"));
+	sectionsMocks.listSections.mockResolvedValue([]);
+	artifactsMocks.listArtifacts.mockResolvedValue([]);
 	tasks.set([]);
 	readyIds.set(new Set());
 	filters.set(defaultTaskFilters());
@@ -300,5 +349,197 @@ describe("detail store", () => {
 		await promise;
 		expect(get(detail).blockers).toEqual([b]);
 		expect(get(detail).mutationError).toBe("Failed to remove dependency");
+	});
+});
+
+describe("detail store — sections", () => {
+	async function loadedDetail(
+		sections: Section[] = [],
+	): Promise<TaskDetailStore> {
+		apiMocks.getTask.mockResolvedValue(makeTask({ id: "t-1" }));
+		apiMocks.getBlockers.mockResolvedValue([]);
+		sectionsMocks.listSections.mockResolvedValue(sections);
+		const detail = createTaskDetailStore("t-1");
+		await detail.ready;
+		return detail;
+	}
+
+	it("loads the task's sections in engine order", async () => {
+		const detail = await loadedDetail([
+			makeSection({ id: "s-1", order: 0 }),
+			makeSection({ id: "s-2", order: 1, section_type: "constraint" }),
+		]);
+
+		expect(sectionsMocks.listSections).toHaveBeenCalledWith("t-1");
+		expect(get(detail).sections.map((section) => section.id)).toEqual([
+			"s-1",
+			"s-2",
+		]);
+		expect(get(detail).sectionsLoading).toBe(false);
+		expect(get(detail).sectionsError).toBeNull();
+	});
+
+	it("reports a load failure instead of silently showing no sections", async () => {
+		apiMocks.getTask.mockResolvedValue(makeTask({ id: "t-1" }));
+		apiMocks.getBlockers.mockResolvedValue([]);
+		sectionsMocks.listSections.mockRejectedValue({
+			message: "Failed to list sections",
+			status: 500,
+		});
+
+		const detail = createTaskDetailStore("t-1");
+		await detail.ready;
+
+		expect(get(detail).sections).toEqual([]);
+		expect(get(detail).sectionsError).toBe("Failed to list sections");
+		expect(get(detail).sectionsLoading).toBe(false);
+	});
+
+	it("appends a created section after the existing ones", async () => {
+		const detail = await loadedDetail([makeSection({ id: "s-1", order: 0 })]);
+		const created = makeSection({ id: "s-2", order: 1 });
+		sectionsMocks.createSection.mockResolvedValue(created);
+
+		await detail.createSection({
+			section_type: "goal",
+			content: "Ship the panel",
+		});
+
+		expect(sectionsMocks.createSection).toHaveBeenCalledWith("t-1", {
+			section_type: "goal",
+			content: "Ship the panel",
+		});
+		expect(get(detail).sections.map((section) => section.id)).toEqual([
+			"s-1",
+			"s-2",
+		]);
+		expect(get(detail).sectionsError).toBeNull();
+	});
+
+	it("replaces the edited row with the stored section", async () => {
+		const detail = await loadedDetail([
+			makeSection({ id: "s-1", section_type: "checklist_item" }),
+		]);
+		sectionsMocks.updateSection.mockResolvedValue(
+			makeSection({
+				id: "s-1",
+				section_type: "checklist_item",
+				checklist_state: "done",
+			}),
+		);
+
+		await detail.updateSection("s-1", { checklist_state: "done" });
+
+		expect(sectionsMocks.updateSection).toHaveBeenCalledWith("s-1", {
+			checklist_state: "done",
+		});
+		expect(get(detail).sections[0].checklist_state).toBe("done");
+	});
+
+	it("rolls an optimistic delete back and surfaces the server error", async () => {
+		const section = makeSection({ id: "s-1" });
+		const detail = await loadedDetail([section]);
+		sectionsMocks.deleteSection.mockRejectedValue({
+			message: "Failed to delete section",
+			status: 500,
+		});
+
+		const promise = detail.deleteSection("s-1").catch(() => {});
+		expect(get(detail).sections).toEqual([]); // optimistic
+
+		await promise;
+		expect(get(detail).sections).toEqual([section]);
+		expect(get(detail).sectionsError).toBe("Failed to delete section");
+	});
+});
+
+describe("detail store — artifacts", () => {
+	async function loadedDetail(
+		artifacts: Artifact[] = [],
+	): Promise<TaskDetailStore> {
+		apiMocks.getTask.mockResolvedValue(makeTask({ id: "t-1" }));
+		apiMocks.getBlockers.mockResolvedValue([]);
+		artifactsMocks.listArtifacts.mockResolvedValue(artifacts);
+		const detail = createTaskDetailStore("t-1");
+		await detail.ready;
+		return detail;
+	}
+
+	it("loads the task's artifacts by logical name", async () => {
+		const detail = await loadedDetail([
+			makeArtifact({ id: "a-1", logical_name: "coverage" }),
+		]);
+
+		expect(artifactsMocks.listArtifacts).toHaveBeenCalledWith("t-1");
+		expect(get(detail).artifacts.map((a) => a.logical_name)).toEqual([
+			"coverage",
+		]);
+		expect(get(detail).artifactsLoading).toBe(false);
+		expect(get(detail).artifactsError).toBeNull();
+	});
+
+	it("reports a load failure instead of silently showing no artifacts", async () => {
+		apiMocks.getTask.mockResolvedValue(makeTask({ id: "t-1" }));
+		apiMocks.getBlockers.mockResolvedValue([]);
+		artifactsMocks.listArtifacts.mockRejectedValue({
+			message: "Failed to list artifacts",
+			status: 500,
+		});
+
+		const detail = createTaskDetailStore("t-1");
+		await detail.ready;
+
+		expect(get(detail).artifacts).toEqual([]);
+		expect(get(detail).artifactsError).toBe("Failed to list artifacts");
+	});
+
+	it("merges a saved artifact by logical name, keeping engine order", async () => {
+		const detail = await loadedDetail([
+			makeArtifact({ id: "a-1", logical_name: "notes" }),
+			makeArtifact({ id: "a-2", logical_name: "spec" }),
+		]);
+		artifactsMocks.putArtifact.mockResolvedValue(
+			makeArtifact({ id: "a-2", logical_name: "spec", content: { v: 2 } }),
+		);
+
+		const saved = await detail.saveArtifact("spec", { v: 2 });
+
+		expect(artifactsMocks.putArtifact).toHaveBeenCalledWith("t-1", "spec", {
+			v: 2,
+		});
+		expect(saved.content).toEqual({ v: 2 });
+		expect(
+			get(detail).artifacts.map((artifact) => artifact.logical_name),
+		).toEqual(["notes", "spec"]);
+		expect(get(detail).artifacts[1].content).toEqual({ v: 2 });
+	});
+
+	it("surfaces a save failure and leaves the stored list untouched", async () => {
+		const existing = makeArtifact({ id: "a-1", logical_name: "notes" });
+		const detail = await loadedDetail([existing]);
+		artifactsMocks.putArtifact.mockRejectedValue({
+			message: "Failed to save artifact",
+			status: 500,
+		});
+
+		await expect(detail.saveArtifact("notes", { v: 2 })).rejects.toBeTruthy();
+		expect(get(detail).artifacts).toEqual([existing]);
+		expect(get(detail).artifactsError).toBe("Failed to save artifact");
+	});
+
+	it("rolls an optimistic delete back and surfaces the server error", async () => {
+		const artifact = makeArtifact({ id: "a-1", logical_name: "notes" });
+		const detail = await loadedDetail([artifact]);
+		artifactsMocks.deleteArtifact.mockRejectedValue({
+			message: "Artifact not found",
+			status: 404,
+		});
+
+		const promise = detail.deleteArtifact("notes").catch(() => {});
+		expect(get(detail).artifacts).toEqual([]); // optimistic
+
+		await promise;
+		expect(get(detail).artifacts).toEqual([artifact]);
+		expect(get(detail).artifactsError).toBe("Artifact not found");
 	});
 });

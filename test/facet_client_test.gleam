@@ -30,7 +30,8 @@ pub fn health_carries_http_status_on_error_test() {
 
 pub fn health_reports_network_failure_test() {
   // Port 1 on loopback is not listening, so the connection is refused.
-  let client_config = config.Config(base_url: "http://127.0.0.1:1", token: None)
+  let client_config =
+    config.Config(base_url: "http://127.0.0.1:1", token: None, project: None)
   let assert Error(config.NetworkError(_)) = client.health(client_config)
 }
 
@@ -81,7 +82,11 @@ pub fn base_request_uses_api_prefix_test() {
   // The request builder is the test seam for endpoint wiring: it must not
   // raise and must carry the configured host.
   let client_config =
-    config.Config(base_url: "http://127.0.0.1:4920", token: None)
+    config.Config(
+      base_url: "http://127.0.0.1:4920",
+      token: None,
+      project: None,
+    )
   let assert Ok(request) =
     client.base_request(client_config, http.Get, "/api/v1/tasks")
   assert request.host == "127.0.0.1"
@@ -92,6 +97,7 @@ fn loopback(port: Int) -> config.Config {
   config.Config(
     base_url: "http://127.0.0.1:" <> int.to_string(port),
     token: None,
+    project: None,
   )
 }
 

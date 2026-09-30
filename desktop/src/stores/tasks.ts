@@ -8,9 +8,14 @@
 // inline.
 import { derived, get, writable, type Readable } from "svelte/store";
 import type { ApiError } from "$lib/api";
+import * as artifactsApi from "$lib/artifacts-api";
+import * as sectionsApi from "$lib/sections-api";
 import * as tasksApi from "$lib/tasks-api";
 import type {
+	Artifact,
 	Section,
+	SectionCreateInput,
+	SectionUpdateInput,
 	Task,
 	TaskCreate,
 	TaskFilters,
@@ -217,10 +222,16 @@ export async function archiveTaskOptimistic(id: string): Promise<void> {
 export interface TaskDetailState {
 	task: Task | null;
 	blockers: Task[];
-	sections: Section[];
-	sectionsAvailable: boolean;
-	loading: boolean;
 	blockersLoading: boolean;
+	sections: Section[];
+	sectionsLoading: boolean;
+	/** Load or mutation failure for the sections panel; null when healthy. */
+	sectionsError: string | null;
+	artifacts: Artifact[];
+	artifactsLoading: boolean;
+	/** Load or mutation failure for the artifacts panel; null when healthy. */
+	artifactsError: string | null;
+	loading: boolean;
 	notFound: boolean;
 	error: string | null;
 	mutationError: string | null;
@@ -232,7 +243,14 @@ export interface TaskDetailStore extends Readable<TaskDetailState> {
 	addBlocker: (dependsOn: string) => Promise<void>;
 	removeBlocker: (dependsOn: string) => Promise<void>;
 	refreshBlockers: () => Promise<void>;
-	/** Resolves when the initial task/blockers/sections load settles. */
+	refreshSections: () => Promise<void>;
+	createSection: (input: SectionCreateInput) => Promise<Section>;
+	updateSection: (id: string, patch: SectionUpdateInput) => Promise<Section>;
+	deleteSection: (id: string) => Promise<void>;
+	refreshArtifacts: () => Promise<void>;
+	saveArtifact: (logicalName: string, content: unknown) => Promise<Artifact>;
+	deleteArtifact: (logicalName: string) => Promise<void>;
+	/** Resolves when the initial task/blockers/sections/artifacts load settles. */
 	ready: Promise<void>;
 }
 
@@ -244,10 +262,14 @@ export function createTaskDetailStore(taskId: string): TaskDetailStore {
 	const state = writable<TaskDetailState>({
 		task: taskById(taskId) ?? null,
 		blockers: [],
-		sections: [],
-		sectionsAvailable: true,
-		loading: true,
 		blockersLoading: true,
+		sections: [],
+		sectionsLoading: true,
+		sectionsError: null,
+		artifacts: [],
+		artifactsLoading: true,
+		artifactsError: null,
+		loading: true,
 		notFound: false,
 		error: null,
 		mutationError: null,
@@ -268,15 +290,131 @@ export function createTaskDetailStore(taskId: string): TaskDetailStore {
 		}
 	}
 
-	async function loadSections(): Promise<void> {
+	/**
+	 * Reload the task's sections. A failure (network, or a build without the
+	 * route) sets `sectionsError` so the panel can render it inline instead of
+	 * pretending there are none.
+	 */
+	async function refreshSections(): Promise<void> {
+		setState({ sectionsLoading: true, sectionsError: null });
 		try {
 			setState({
-				sections: await tasksApi.listSections(taskId),
-				sectionsAvailable: true,
+				sections: sectionsApi.sortSections(
+					await sectionsApi.listSections(taskId),
+				),
 			});
-		} catch {
-			// Route not implemented yet (C6 scope) — explicit unavailable state.
-			setState({ sections: [], sectionsAvailable: false });
+		} catch (e) {
+			setState({ sectionsError: errorMessage(e) });
+		} finally {
+			setState({ sectionsLoading: false });
+		}
+	}
+
+	async function createSection(input: SectionCreateInput): Promise<Section> {
+		setState({ sectionsError: null });
+		try {
+			const created = await sectionsApi.createSection(taskId, input);
+			// The engine appends at the next free order, so re-sorting keeps the
+			// merged list in the same sequence the list endpoint would return.
+			setState({
+				sections: sectionsApi.sortSections([...get(state).sections, created]),
+			});
+			return created;
+		} catch (e) {
+			setState({ sectionsError: errorMessage(e) });
+			throw e;
+		}
+	}
+
+	async function updateSection(
+		id: string,
+		patch: SectionUpdateInput,
+	): Promise<Section> {
+		setState({ sectionsError: null });
+		try {
+			const updated = await sectionsApi.updateSection(id, patch);
+			setState({
+				sections: sectionsApi.sortSections(
+					get(state).sections.map((section) =>
+						section.id === id ? updated : section,
+					),
+				),
+			});
+			return updated;
+		} catch (e) {
+			setState({ sectionsError: errorMessage(e) });
+			throw e;
+		}
+	}
+
+	async function deleteSection(id: string): Promise<void> {
+		const previous = get(state).sections;
+		setState({
+			sections: previous.filter((section) => section.id !== id),
+			sectionsError: null,
+		});
+		try {
+			await sectionsApi.deleteSection(id);
+		} catch (e) {
+			setState({ sections: previous, sectionsError: errorMessage(e) });
+			throw e;
+		}
+	}
+
+	/** Reload the task's artifacts; failures surface through `artifactsError`. */
+	async function refreshArtifacts(): Promise<void> {
+		setState({ artifactsLoading: true, artifactsError: null });
+		try {
+			setState({
+				artifacts: await artifactsApi.listArtifacts(taskId),
+			});
+		} catch (e) {
+			setState({ artifactsError: errorMessage(e) });
+		} finally {
+			setState({ artifactsLoading: false });
+		}
+	}
+
+	/** Upsert one artifact by logical name and merge the stored row in place. */
+	async function saveArtifact(
+		logicalName: string,
+		content: unknown,
+	): Promise<Artifact> {
+		setState({ artifactsError: null });
+		try {
+			const saved = await artifactsApi.putArtifact(
+				taskId,
+				logicalName,
+				content,
+			);
+			setState({
+				artifacts: artifactsApi.sortArtifacts([
+					...get(state).artifacts.filter(
+						(artifact) => artifact.logical_name !== saved.logical_name,
+					),
+					saved,
+				]),
+			});
+			return saved;
+		} catch (e) {
+			setState({ artifactsError: errorMessage(e) });
+			throw e;
+		}
+	}
+
+	async function deleteArtifact(logicalName: string): Promise<void> {
+		const previous = get(state).artifacts;
+		setState({
+			artifacts: previous.filter(
+				(artifact) => artifact.logical_name !== logicalName,
+			),
+			artifactsError: null,
+		});
+		try {
+			await artifactsApi.deleteArtifact(taskId, logicalName);
+		} catch (e) {
+			setState({ artifacts: previous, artifactsError: errorMessage(e) });
+			throw e;
 		}
 	}
 
@@ -372,7 +510,12 @@ export function createTaskDetailStore(taskId: string): TaskDetailStore {
 
 	// Kick off loading immediately; callers can await `ready` for tests.
 	const ready = (async () => {
-		await Promise.all([load(), refreshBlockers(), loadSections()]);
+		await Promise.all([
+			load(),
+			refreshBlockers(),
+			refreshSections(),
+			refreshArtifacts(),
+		]);
 	})();
 
 	return {
@@ -382,6 +525,13 @@ export function createTaskDetailStore(taskId: string): TaskDetailStore {
 		addBlocker,
 		removeBlocker,
 		refreshBlockers,
+		refreshSections,
+		createSection,
+		updateSection,
+		deleteSection,
+		refreshArtifacts,
+		saveArtifact,
+		deleteArtifact,
 		ready,
 	};
 }

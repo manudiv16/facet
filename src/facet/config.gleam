@@ -1,15 +1,21 @@
 //// Facet client configuration.
 ////
-//// The base URL and optional bearer token are resolved from the environment
-//// (`FACET_URL` / `FACET_TOKEN`). When no URL is configured the client targets
-//// the local Crystalline sidecar at `http://localhost:4920`.
+//// The base URL, optional bearer token and project scope are resolved from the
+//// environment (`FACET_URL`, `FACET_TOKEN`, `FACET_PROJECT`) and — for the
+//// project — the persisted config file written by `facet init`. The CLI adds a
+//// `--project` flag that outranks all of these; see `resolve_project_for`.
+//// When no URL is configured the client targets the local Crystalline sidecar
+//// at `http://localhost:4920`.
 ////
 //// `validate` performs a live check against the server's `/health` endpoint.
 
 import facet/ffi
+import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
 import gleam/httpc
+import gleam/json
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import gleam/uri
@@ -17,9 +23,19 @@ import gleam/uri
 /// Default Crystalline base URL used when `FACET_URL` is not set.
 pub const default_base_url = "http://localhost:4920"
 
-/// Resolved client configuration.
+/// Header carrying the project id or slug that scopes a request.
+pub const project_header = "x-crystalline-project"
+
+/// Environment variable holding the project scope (overrides the config file).
+pub const project_env = "FACET_PROJECT"
+
+/// Environment variable overriding the config file path (used by tests).
+pub const config_path_env = "FACET_CONFIG"
+
+/// Resolved client configuration. `project` is the scope sent as
+/// `X-Crystalline-Project`; `None` leaves the engine on its `default` project.
 pub type Config {
-  Config(base_url: String, token: Option(String))
+  Config(base_url: String, token: Option(String), project: Option(String))
 }
 
 /// Every failure mode of the Facet HTTP client.
@@ -36,31 +52,38 @@ pub type ClientError {
 
 /// The configuration used when no environment variables are set.
 pub fn default_config() -> Config {
-  Config(base_url: default_base_url, token: None)
+  Config(base_url: default_base_url, token: None, project: None)
 }
 
-/// Resolve configuration from `FACET_URL` and `FACET_TOKEN`.
+/// Resolve configuration from `FACET_URL`, `FACET_TOKEN` and `FACET_PROJECT`.
 ///
 /// - A valid `FACET_URL` yields `Ok(Config)`.
-/// - With neither variable set, yields `Ok(default_config())`.
+/// - With none of the variables set, yields `Ok(default_config())`.
 /// - A malformed URL yields `Error(ConfigError)`.
+///
+/// The persisted project (`facet init`) is *not* consulted here; the CLI adds
+/// it through `resolve_project_for` so the flag > env > file order stays in one
+/// place.
 pub fn resolve() -> Result(Config, ClientError) {
   let base_url = case get_env("FACET_URL") {
     Some(url) -> url
     None -> default_base_url
   }
   let token = get_env("FACET_TOKEN")
-  resolve_with(base_url, token)
+  let project = get_env(project_env)
+  resolve_with(base_url, token, project)
 }
 
-/// Like `resolve`, accepting explicit URL and token values. Explicit values
-/// are used as given (the CLI passes `--url` / `--token` here).
+/// Like `resolve`, accepting explicit URL, token and project values. Explicit
+/// values are used as given (the CLI passes `--url` / `--token` / `--project`
+/// here).
 pub fn resolve_with(
   base_url: String,
   token: Option(String),
+  project: Option(String),
 ) -> Result(Config, ClientError) {
   case valid_url(base_url) {
-    True -> Ok(Config(base_url:, token:))
+    True -> Ok(Config(base_url:, token:, project:))
     False -> Error(ConfigError("invalid base URL: " <> base_url))
   }
 }
@@ -68,6 +91,102 @@ pub fn resolve_with(
 /// Alias for `resolve`, for callers that prefer the explicit name.
 pub fn resolve_from_env() -> Result(Config, ClientError) {
   resolve()
+}
+
+// ─── Persisted project (config file) ────────────────────────────────────────
+
+/// The persisted client config. Today it only remembers the project scope
+/// written by `facet init`; unknown keys are ignored so the file can grow.
+pub type ConfigFile {
+  ConfigFile(project: Option(String))
+}
+
+/// The config file path: `FACET_CONFIG` wins, then
+/// `$XDG_CONFIG_HOME/facet/config.json`, then `$HOME/.config/facet/config.json`,
+/// falling back to `.facet.json` in the working directory.
+pub fn config_file_path() -> String {
+  case get_env(config_path_env) {
+    Some(path) -> path
+    None ->
+      case get_env("XDG_CONFIG_HOME") {
+        Some(dir) -> dir <> "/facet/config.json"
+        None ->
+          case get_env("HOME") {
+            Some(home) -> home <> "/.config/facet/config.json"
+            None -> ".facet.json"
+          }
+      }
+  }
+}
+
+/// Read the persisted config, tolerating a missing or malformed file (both
+/// mean "no persisted project" rather than a hard failure).
+pub fn read_config_file() -> ConfigFile {
+  case ffi.read_file(config_file_path()) {
+    Error(_) -> ConfigFile(project: None)
+    Ok(content) -> decode_config_file(content)
+  }
+}
+
+fn decode_config_file(content: String) -> ConfigFile {
+  case json.parse(content, config_file_decoder()) {
+    Ok(config_file) -> config_file
+    Error(_) -> ConfigFile(project: None)
+  }
+}
+
+fn config_file_decoder() -> decode.Decoder(ConfigFile) {
+  use project <- decode.optional_field(
+    "project",
+    None,
+    decode.optional(decode.string),
+  )
+  decode.success(ConfigFile(project: project))
+}
+
+/// Resolve the project scope, most specific source first:
+/// `--project` flag > `FACET_PROJECT` > config file > absent.
+pub fn resolve_project_for(
+  flag: Option(String),
+  env: Option(String),
+  config_file: ConfigFile,
+) -> Option(String) {
+  case flag, env {
+    Some(project), _ -> Some(project)
+    None, Some(project) -> Some(project)
+    None, None -> config_file.project
+  }
+}
+
+/// Persist `project` (an id or slug) as the client's default scope, creating
+/// the parent directory if needed. `facet init` is the only caller.
+pub fn save_project(project: String) -> Result(Nil, ClientError) {
+  let path = config_file_path()
+  let body = json.to_string(json.object([#("project", json.string(project))]))
+  case ffi.make_dir(dirname(path)) {
+    Error(message) ->
+      Error(ConfigError("cannot create config directory: " <> message))
+    Ok(_) ->
+      case ffi.write_file(path, body) {
+        Ok(_) -> Ok(Nil)
+        Error(message) ->
+          Error(ConfigError("cannot write " <> path <> ": " <> message))
+      }
+  }
+}
+
+fn dirname(path: String) -> String {
+  case string.split(path, "/") {
+    [_, ..] -> {
+      let segments = string.split(path, "/")
+      let #(parent, _) = list.split(segments, list.length(segments) - 1)
+      case string.join(parent, "/") {
+        "" -> "/"
+        parent -> parent
+      }
+    }
+    _ -> "."
+  }
 }
 
 /// Validate a configuration by requesting `/health` from the server.

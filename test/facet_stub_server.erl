@@ -2,7 +2,10 @@
 -export([
     start/2,
     start_capture/2,
-    get_captured/1
+    start_capture_script/1,
+    get_captured/1,
+    get_captured_all/1,
+    get_captured_headers/1
 ]).
 
 %% Start a one-shot HTTP/1.1 stub server on an ephemeral loopback port.
@@ -12,9 +15,16 @@
 %% closes.
 %%
 %% `start_capture/2` additionally returns {ListenSocket, Port, Collector};
-%% the received request line is forwarded to the collector process and can be
+%% the received request is forwarded to the collector process and can be
 %% fetched with `get_captured/1` as {Method, PathAndQuery, Body}. This lets
 %% tests assert that a client hit exactly the endpoint it should.
+%%
+%% `start_capture_script/1` serves a list of {Status, Body} responses in
+%% order, one connection per entry, for commands that make more than one
+%% request (e.g. `facet init` looks a project up, then creates it).
+%% `get_captured_all/1` returns every request in order and
+%% `get_captured_headers/1` the headers of the last one, lowercased as
+%% "name: value".
 start(Status, Body) ->
     {ok, Listen} = new_listener(),
     {ok, Port} = inet:port(Listen),
@@ -22,10 +32,13 @@ start(Status, Body) ->
     {Listen, Port}.
 
 start_capture(Status, Body) ->
+    start_capture_script([{Status, Body}]).
+
+start_capture_script(Responses) ->
     {ok, Listen} = new_listener(),
     {ok, Port} = inet:port(Listen),
-    Collector = spawn(fun() -> collector(undefined) end),
-    spawn(fun() -> serve_capture(Listen, Status, Body, Collector) end),
+    Collector = spawn(fun() -> collector([]) end),
+    spawn(fun() -> serve_capture(Listen, Responses, Collector) end),
     {Listen, Port, Collector}.
 
 get_captured(Collector) ->
@@ -36,14 +49,46 @@ get_captured(Collector) ->
         undefined
     end.
 
-%% Keep the last captured request; answer sync queries.
-collector(Request) ->
+get_captured_all(Collector) ->
+    Collector ! {get_all, self()},
     receive
-        {capture, New} -> collector(New);
-        {get, From} ->
-            From ! {captured, Request},
-            collector(Request)
+        {captured, Requests} -> Requests
+    after 2000 ->
+        []
     end.
+
+get_captured_headers(Collector) ->
+    Collector ! {get_headers, self()},
+    receive
+        {captured, Headers} -> Headers
+    after 2000 ->
+        []
+    end.
+
+%% Keep every captured request (newest first); answer sync queries.
+collector(Requests) ->
+    receive
+        {capture, Raw} -> collector([Raw | Requests]);
+        {get, From} ->
+            From ! {captured, case last_request(Requests) of
+                undefined -> undefined;
+                Raw -> parse_request(Raw)
+            end},
+            collector(Requests);
+        {get_all, From} ->
+            From ! {captured, [parse_request(Raw) || Raw <- lists:reverse(Requests)]},
+            collector(Requests);
+        {get_headers, From} ->
+            Headers = case last_request(Requests) of
+                undefined -> [];
+                Raw -> headers_of(Raw)
+            end,
+            From ! {captured, Headers},
+            collector(Requests)
+    end.
+
+last_request([]) -> undefined;
+last_request([Raw | _]) -> Raw.
 
 new_listener() ->
     gen_tcp:listen(0, [
@@ -64,15 +109,25 @@ serve(Listen, Status, Body) ->
     end,
     gen_tcp:close(Listen).
 
-serve_capture(Listen, Status, Body, Collector) ->
-    case gen_tcp:accept(Listen, 10000) of
-        {ok, Sock} ->
-            {ok, Request} = gen_tcp:recv(Sock, 0, 5000),
-            Collector ! {capture, parse_request(Request)},
-            respond(Sock, Status, Body);
-        _ ->
-            ok
-    end,
+serve_capture(Listen, Responses, Collector) ->
+    lists:foreach(
+        fun({Status, Body}) ->
+            case gen_tcp:accept(Listen, 10000) of
+                {ok, Sock} ->
+                    case gen_tcp:recv(Sock, 0, 5000) of
+                        {ok, Request} ->
+                            Collector ! {capture, Request},
+                            respond(Sock, Status, Body);
+                        _ ->
+                            ok
+                    end,
+                    gen_tcp:close(Sock);
+                _ ->
+                    ok
+            end
+        end,
+        Responses
+    ),
     gen_tcp:close(Listen).
 
 respond(Sock, Status, Body) ->
@@ -98,6 +153,20 @@ parse_request(Bin) ->
     [Line | _] = binary:split(Head, <<"\r\n">>),
     [Method, Target | _] = binary:split(Line, <<" ">>, [global]),
     [Method, Target, Body].
+
+%% Header lines of a request, lowercased and formatted "name: value".
+headers_of(Bin) ->
+    [Head | _] = binary:split(Bin, <<"\r\n\r\n">>),
+    [_RequestLine | Lines] = binary:split(Head, <<"\r\n">>, [global]),
+    [lower_header(Line) || Line <- Lines, Line =/= <<>>].
+
+lower_header(Line) ->
+    case binary:split(Line, <<":">>) of
+        [Name, Value] ->
+            <<(string:lowercase(Name))/binary, ": ", (string:trim(Value))/binary>>;
+        _ ->
+            Line
+    end.
 
 reason(200) -> "OK";
 reason(201) -> "Created";

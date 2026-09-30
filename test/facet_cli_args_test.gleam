@@ -4,6 +4,7 @@ import facet/cli/args
 import facet/cli/types
 import facet/models
 import gleam/option.{None, Some}
+import gleam/string
 
 pub fn empty_args_is_a_usage_error_test() {
   let assert Error(message) = args.parse([])
@@ -352,4 +353,258 @@ pub fn double_dash_ends_flag_parsing_test() {
 pub fn unknown_flag_after_command_is_an_error_test() {
   let assert Error(message) = args.parse(["task", "list", "--nope"])
   assert message == "unknown flag: --nope"
+}
+
+// ─── task sections ──────────────────────────────────────────────────────────
+
+pub fn task_sections_parses_one_id_test() {
+  let assert Ok(invocation) = args.parse(["task", "sections", "task-1"])
+  assert invocation.command == types.TaskSections("task-1")
+}
+
+pub fn task_sections_requires_an_id_test() {
+  let assert Error(message) = args.parse(["task", "sections"])
+  assert message == "task sections expects a task id"
+}
+
+pub fn task_section_add_parses_type_and_content_test() {
+  let assert Ok(invocation) =
+    args.parse([
+      "task",
+      "section",
+      "add",
+      "task-1",
+      "--type",
+      "testing_criterion",
+      "--content",
+      "gleam test stays green",
+    ])
+  let assert types.TaskSectionAdd(id, add) = invocation.command
+  assert id == "task-1"
+  assert add.section_type == models.TestingCriterion
+  assert add.content == "gleam test stays green"
+}
+
+pub fn task_section_add_requires_a_type_test() {
+  let assert Error(message) =
+    args.parse(["task", "section", "add", "task-1", "--content", "Ship it"])
+  assert message == "task section add requires --type <section-type>"
+}
+
+pub fn task_section_add_requires_content_test() {
+  let assert Error(message) =
+    args.parse(["task", "section", "add", "task-1", "--type", "goal"])
+  assert message == "task section add requires --content <text>"
+}
+
+pub fn task_section_add_rejects_unknown_type_test() {
+  let assert Error(message) =
+    args.parse([
+      "task",
+      "section",
+      "add",
+      "task-1",
+      "--type",
+      "summary",
+      "--content",
+      "Ship it",
+    ])
+  assert string.contains(message, "invalid section type: summary")
+}
+
+pub fn unknown_task_section_subcommand_is_an_error_test() {
+  let assert Error(message) = args.parse(["task", "section", "remove", "s1"])
+  assert message == "unknown task section subcommand: remove"
+}
+
+// ─── init / project scope ───────────────────────────────────────────────────
+
+pub fn init_parses_slug_and_optional_name_test() {
+  let assert Ok(invocation) = args.parse(["init", "acme"])
+  let assert types.Init(init) = invocation.command
+  assert init.slug == "acme"
+  assert init.name == None
+
+  let assert Ok(invocation) = args.parse(["init", "acme", "--name", "Acme Inc"])
+  let assert types.Init(init) = invocation.command
+  assert init.name == Some("Acme Inc")
+}
+
+pub fn init_requires_exactly_one_slug_test() {
+  let assert Error(message) = args.parse(["init"])
+  assert message == "init expects a project slug"
+  let assert Error(message) = args.parse(["init", "a", "b"])
+  assert message == "init takes exactly one slug argument"
+}
+
+pub fn project_global_parses_before_the_command_test() {
+  let assert Ok(invocation) = args.parse(["--project", "acme", "health"])
+  assert invocation.project == Some("acme")
+  assert invocation.command == types.Health
+
+  let assert Ok(invocation) = args.parse(["--project=acme", "health"])
+  assert invocation.project == Some("acme")
+
+  let assert Ok(invocation) = args.parse(["health"])
+  assert invocation.project == None
+}
+
+// ─── path / stop ────────────────────────────────────────────────────────────
+
+pub fn path_and_stop_parse_one_id_test() {
+  let assert Ok(invocation) = args.parse(["path", "task-2"])
+  let assert types.Path(task_id) = invocation.command
+  assert task_id == "task-2"
+
+  let assert Ok(invocation) = args.parse(["stop", "flow-1"])
+  let assert types.Stop(instance_id) = invocation.command
+  assert instance_id == "flow-1"
+}
+
+pub fn path_and_stop_require_an_id_test() {
+  let assert Error(message) = args.parse(["path"])
+  assert message == "path expects an id"
+  let assert Error(message) = args.parse(["stop"])
+  assert message == "stop expects an id"
+}
+
+// ─── task ref / unref ───────────────────────────────────────────────────────
+
+pub fn task_ref_parses_code_reference_flags_test() {
+  let assert Ok(invocation) =
+    args.parse([
+      "task",
+      "ref",
+      "task-1",
+      "src/main.gleam",
+      "--line-start",
+      "10",
+      "--line-end",
+      "20",
+      "--name",
+      "main",
+      "--description",
+      "entry point",
+    ])
+  let assert types.TaskRef(task_id, ref) = invocation.command
+  assert task_id == "task-1"
+  assert ref.code_path == "src/main.gleam"
+  assert ref.line_start == Some(10)
+  assert ref.line_end == Some(20)
+  assert ref.name == Some("main")
+  assert ref.description == Some("entry point")
+  // Defaults: the section is `context` and its content is the code path.
+  assert ref.section_type == models.Context
+  assert ref.content == "src/main.gleam"
+}
+
+pub fn task_ref_honours_type_and_content_test() {
+  let assert Ok(invocation) =
+    args.parse([
+      "task",
+      "ref",
+      "task-1",
+      "src/main.gleam",
+      "--type",
+      "failure_test",
+      "--content",
+      "regression guard",
+    ])
+  let assert types.TaskRef(_, ref) = invocation.command
+  assert ref.section_type == models.FailureTest
+  assert ref.content == "regression guard"
+}
+
+pub fn task_ref_requires_task_and_path_test() {
+  let assert Error(message) = args.parse(["task", "ref"])
+  assert message == "task ref expects <task-id> <path>"
+  let assert Error(message) = args.parse(["task", "ref", "task-1"])
+  assert message == "task ref expects <task-id> <path>"
+  let assert Error(message) = args.parse(["task", "ref", "t", "p", "extra"])
+  assert message == "task ref takes exactly two positional arguments"
+}
+
+pub fn task_ref_rejects_a_bad_line_number_test() {
+  let assert Error(message) =
+    args.parse([
+      "task",
+      "ref",
+      "task-1",
+      "src/main.gleam",
+      "--line-start",
+      "ten",
+    ])
+  assert message == "invalid value for --line-start: ten"
+}
+
+pub fn task_unref_parses_task_and_section_test() {
+  let assert Ok(invocation) = args.parse(["task", "unref", "task-1", "sec-9"])
+  let assert types.TaskUnref(task_id, section_id) = invocation.command
+  assert task_id == "task-1"
+  assert section_id == "sec-9"
+
+  let assert Error(message) = args.parse(["task", "unref", "task-1"])
+  assert message == "task unref expects <task-id> <section-id>"
+}
+
+// ─── artifact ───────────────────────────────────────────────────────────────
+
+pub fn artifact_subcommands_parse_test() {
+  let assert Ok(invocation) = args.parse(["artifact", "task-1", "list"])
+  assert invocation.command == types.ArtifactList("task-1")
+
+  let assert Ok(invocation) =
+    args.parse(["artifact", "task-1", "get", "plan.json"])
+  let assert types.ArtifactGet(task_id, logical_name) = invocation.command
+  assert task_id == "task-1"
+  assert logical_name == "plan.json"
+
+  let assert Ok(invocation) =
+    args.parse([
+      "artifact",
+      "task-1",
+      "put",
+      "plan.json",
+      "--content",
+      "{\"a\":1}",
+    ])
+  let assert types.ArtifactPut(task_id, logical_name, content) =
+    invocation.command
+  assert task_id == "task-1"
+  assert logical_name == "plan.json"
+  assert content == types.InlineContent("{\"a\":1}")
+
+  let assert Ok(invocation) =
+    args.parse(["artifact", "task-1", "delete", "plan.json"])
+  let assert types.ArtifactDelete(task_id, logical_name) = invocation.command
+  assert task_id == "task-1"
+  assert logical_name == "plan.json"
+}
+
+pub fn artifact_put_dash_selects_stdin_test() {
+  let assert Ok(invocation) =
+    args.parse(["artifact", "task-1", "put", "plan.json", "--content", "-"])
+  let assert types.ArtifactPut(_, _, content) = invocation.command
+  assert content == types.StdinContent
+}
+
+pub fn artifact_put_requires_content_test() {
+  let assert Error(message) =
+    args.parse(["artifact", "task-1", "put", "plan.json"])
+  assert message == "artifact put requires --content <json|->"
+}
+
+pub fn artifact_errors_test() {
+  let assert Error(message) = args.parse(["artifact"])
+  assert message == "artifact: missing subcommand (get, put, list, delete)"
+
+  let assert Error(message) = args.parse(["artifact", "task-1", "frobnicate"])
+  assert message == "unknown artifact subcommand: frobnicate"
+
+  let assert Error(message) = args.parse(["artifact", "task-1", "get"])
+  assert message == "artifact get expects <task-id> get <logical-name>"
+
+  let assert Error(message) =
+    args.parse(["artifact", "task-1", "list", "extra"])
+  assert message == "artifact list takes no logical name"
 }

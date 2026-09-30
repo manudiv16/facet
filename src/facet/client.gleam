@@ -35,6 +35,37 @@ pub fn health(config: Config) -> Result(models.HealthStatus, ClientError) {
   expect_json(config, req, models.decode_health_status())
 }
 
+// ─── Projects ───────────────────────────────────────────────────────────────
+
+/// `POST /api/v1/projects` — 201 on create, 409 when the slug is taken.
+pub fn create_project(
+  config: Config,
+  slug: String,
+  name: String,
+) -> Result(models.Project, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/projects",
+  ))
+  req
+  |> json_body(models.encode_project_create(models.ProjectCreate(slug:, name:)))
+  |> expect_json(config, _, models.decode_project())
+}
+
+/// `GET /api/v1/projects/:id` — by project id or slug.
+pub fn get_project(
+  config: Config,
+  id_or_slug: String,
+) -> Result(models.Project, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/projects/" <> path_segment(id_or_slug),
+  ))
+  expect_json(config, req, models.decode_project())
+}
+
 // ─── Tasks ──────────────────────────────────────────────────────────────────
 
 /// `GET /api/v1/tasks` (or `/api/v1/tasks/ready` when `filters.ready`).
@@ -118,6 +149,19 @@ pub fn delete_task(
 
 // ─── Task dependencies ─────────────────────────────────────────────────────
 
+/// `GET /api/v1/tasks/:id/path` — the ordered ancestor chain root→task.
+pub fn get_task_path(
+  config: Config,
+  id: String,
+) -> Result(List(models.Task), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/path",
+  ))
+  expect_json(config, req, models.decode_task_path())
+}
+
 /// `POST /api/v1/tasks/:id/dependencies` — makes `task_id` depend on
 /// `depends_on`, so `task_id` is blocked while `depends_on` is open.
 pub fn add_dependency(
@@ -168,6 +212,55 @@ pub fn get_blockers(
   expect_json(config, req, decode.list(models.decode_task()))
 }
 
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+/// `GET /api/v1/tasks/:id/sections` — the structured sections of a task.
+/// Crystalline builds without the sections API (crystalline#16) answer 404,
+/// which surfaces as `HttpError(404, ...)`.
+pub fn list_sections(
+  config: Config,
+  id: String,
+) -> Result(List(models.Section), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/sections",
+  ))
+  expect_json(config, req, decode.list(models.decode_section()))
+}
+
+/// `POST /api/v1/tasks/:id/sections` — append a section to a task.
+pub fn create_section(
+  config: Config,
+  id: String,
+  body: models.SectionCreate,
+) -> Result(models.Section, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/sections",
+  ))
+  req
+  |> json_body(models.encode_section_create(body))
+  |> expect_json(config, _, models.decode_section())
+}
+
+/// `PATCH /api/v1/sections/:id` — currently only used to clear a section's
+/// code reference (`{"code_ref": null}`).
+pub fn clear_section_code_ref(
+  config: Config,
+  id: String,
+) -> Result(models.Section, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Patch,
+    api_prefix <> "/sections/" <> path_segment(id),
+  ))
+  req
+  |> json_body(models.encode_code_ref_clear())
+  |> expect_json(config, _, models.decode_section())
+}
+
 // ─── Flow templates ─────────────────────────────────────────────────────────
 
 /// `GET /api/v1/flow-templates`
@@ -199,6 +292,14 @@ pub fn get_template(
 
 /// `GET /api/v1/flows/:instance_id` — current execution state of a flow
 /// instance (status, current node, step history, variables).
+///
+/// NOTE (facet#14): Crystalline registers no instance-addressed read. Its
+/// flow routes address instances through their task
+/// (`GET /api/v1/tasks/:task_id/flow`, which answers the
+/// `{"instance","execution"}` envelope), so `facet flow status <instance-id>`
+/// answers 404 until the engine grows the route. The client cannot derive the
+/// task from the instance alone, so this stays as the declared contract rather
+/// than being silently redirected.
 pub fn get_flow_state(
   config: Config,
   instance_id: String,
@@ -211,12 +312,14 @@ pub fn get_flow_state(
   expect_json(config, req, models.decode_execution_state())
 }
 
-/// `POST /api/v1/tasks/:task_id/flow`
+/// `POST /api/v1/tasks/:task_id/flow` — 201 with the
+/// `{"instance", "execution"}` envelope: the new (pending) instance and the
+/// execution row created for it.
 pub fn start_flow(
   config: Config,
   task_id: String,
   template_id: String,
-) -> Result(models.FlowInstance, ClientError) {
+) -> Result(models.FlowInstantiation, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -226,52 +329,52 @@ pub fn start_flow(
   |> json_body(
     models.encode_start_flow_request(models.StartFlowRequest(template_id:)),
   )
-  |> expect_json(config, _, models.decode_flow_instance())
+  |> expect_json(config, _, models.decode_flow_instantiation())
 }
 
-/// `POST /api/v1/flows/:instance_id/advance` — returns the engine `Action`.
+/// `POST /api/v1/flows/:instance_id/advance` — the `{"execution", "action"}`
+/// envelope: the state after the step and the next engine `Action`.
 pub fn advance_flow(
   config: Config,
   instance_id: String,
-) -> Result(models.Action, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
     api_prefix <> "/flows/" <> path_segment(instance_id) <> "/advance",
   ))
-  expect_json(config, req, models.decode_action())
+  expect_json(config, req, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/steps/:step_id/complete`
+/// `POST /api/v1/flows/:instance_id/complete` — report the running step's
+/// output and receive the next `{"execution", "action"}` envelope.
+///
+/// The engine identifies the step through the execution's `current_node_id`,
+/// so the request carries only the output; the step id is the caller's.
 pub fn complete_step(
   config: Config,
   instance_id: String,
-  step_id: String,
   output: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
-    api_prefix
-      <> "/flows/"
-      <> path_segment(instance_id)
-      <> "/steps/"
-      <> path_segment(step_id)
-      <> "/complete",
+    api_prefix <> "/flows/" <> path_segment(instance_id) <> "/complete",
   ))
   req
   |> json_body(
     models.encode_complete_step_request(models.CompleteStepRequest(output:)),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/input`
+/// `POST /api/v1/flows/:instance_id/input` — resume from `awaiting_input`
+/// with the human's text; answers the `{"execution", "action"}` envelope.
 pub fn provide_input(
   config: Config,
   instance_id: String,
   input_text: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -283,15 +386,16 @@ pub fn provide_input(
       input: input_text,
     )),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/reject`
+/// `POST /api/v1/flows/:instance_id/reject` — mark the execution rejected;
+/// answers the `{"execution", "action": {"type": "flow_reject"}}` envelope.
 pub fn reject_flow(
   config: Config,
   instance_id: String,
   reason: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -301,7 +405,23 @@ pub fn reject_flow(
   |> json_body(
     models.encode_reject_flow_request(models.RejectFlowRequest(reason:)),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
+}
+
+/// `POST /api/v1/flows/:instance_id/cancel` — 200 with the cancelled
+/// execution; 409 when the execution is pending or already terminal, with the
+/// status named in the error body. Unlike the step routes this answers the
+/// execution body bare.
+pub fn cancel_flow(
+  config: Config,
+  instance_id: String,
+) -> Result(models.ExecutionSummary, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/flows/" <> path_segment(instance_id) <> "/cancel",
+  ))
+  expect_json(config, req, models.decode_execution_summary())
 }
 
 // ─── Executions ─────────────────────────────────────────────────────────────
@@ -384,9 +504,83 @@ pub fn append_log(
   |> expect_json(config, _, models.decode_session_log())
 }
 
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+
+/// `GET /api/v1/tasks/:task_id/artifacts` — the task's artifacts by logical
+/// name. Project-scoped by the engine (the task must belong to the configured
+/// project).
+pub fn list_artifacts(
+  config: Config,
+  task_id: String,
+) -> Result(List(models.Artifact), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(task_id) <> "/artifacts",
+  ))
+  expect_json(config, req, decode.list(models.decode_artifact()))
+}
+
+/// `GET /api/v1/tasks/:task_id/artifacts/:logical_name`
+pub fn get_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+) -> Result(models.Artifact, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    artifact_path(task_id, logical_name),
+  ))
+  expect_json(config, req, models.decode_artifact())
+}
+
+/// `PUT /api/v1/tasks/:task_id/artifacts/:logical_name` — insert or replace;
+/// the engine answers 200 either way.
+pub fn put_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+  content: json.Json,
+) -> Result(models.Artifact, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Put,
+    artifact_path(task_id, logical_name),
+  ))
+  req
+  |> json_body(models.encode_artifact_put(models.ArtifactPut(content:)))
+  |> expect_json(config, _, models.decode_artifact())
+}
+
+/// `DELETE /api/v1/tasks/:task_id/artifacts/:logical_name`
+pub fn delete_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+) -> Result(models.Message, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Delete,
+    artifact_path(task_id, logical_name),
+  ))
+  expect_json(config, req, models.decode_message())
+}
+
+fn artifact_path(task_id: String, logical_name: String) -> String {
+  api_prefix
+  <> "/tasks/"
+  <> path_segment(task_id)
+  <> "/artifacts/"
+  <> path_segment(logical_name)
+}
+
 // ─── Request building ───────────────────────────────────────────────────────
 
-/// Build an authenticated request against `config.base_url`.
+/// Build an authenticated request against `config.base_url`. When the config
+/// carries a project scope it is sent as `X-Crystalline-Project` (id or slug),
+/// which the engine resolves per request; without one the engine uses its
+/// `default` project.
 pub fn base_request(
   config: Config,
   method: http.Method,
@@ -400,8 +594,19 @@ pub fn base_request(
         req
         |> request.set_method(method)
         |> request.set_header("accept", "application/json")
+        |> add_project(config)
         |> add_auth(config),
       )
+  }
+}
+
+fn add_project(
+  req: request.Request(String),
+  config: Config,
+) -> request.Request(String) {
+  case config.project {
+    Some(project) -> request.set_header(req, config.project_header, project)
+    None -> req
   }
 }
 

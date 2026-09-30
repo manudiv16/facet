@@ -7,6 +7,11 @@
 #   FACET_URL        -> connect to a remote instance instead of spawning (skips sidecar)
 #   CRYSTALLINE_DB   -> override the database path
 #   CRYSTALLINE_PORT -> override the preferred port
+#
+# Provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) are NOT configured
+# here: they are entered in the app's Settings screen, stored in the OS
+# keychain, and forwarded to the embedded sidecar's environment at spawn.
+# Remote mode (FACET_URL) never receives them.
 
 [sidecar]
 # Binary name without the platform suffix. The file on disk must be named
