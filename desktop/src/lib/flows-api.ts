@@ -1,15 +1,16 @@
-// Flows API — HTTP access to the Crystalline flow endpoints (C7).
+// Flows API — HTTP access to the Crystalline flow-instance endpoints (C7).
 //
-// Endpoint contract (Crystalline C7, `http/routes/flows.gleam`):
-//   GET    /api/v1/flow-templates
-//   GET    /api/v1/flow-templates/:id
-//   POST   /api/v1/tasks/:task_id/flow           { template_id }
-//   GET    /api/v1/tasks/:task_id/flow
+// Endpoint contract (Crystalline `http/routes/flows.gleam`):
+//   POST   /api/v1/tasks/:task_id/flow           { template_id } → instantiate (201)
+//   GET    /api/v1/tasks/:task_id/flow           instance + execution state (404 unbound)
+//   DELETE /api/v1/tasks/:task_id/flow           unassign a finished flow (200; 404 unbound; 409 active)
 //   POST   /api/v1/flows/:instance_id/advance
-//   POST   /api/v1/flows/:instance_id/steps/:step_id/complete  { output }
-//   POST   /api/v1/flows/:instance_id/input                   { input }
-//   POST   /api/v1/flows/:instance_id/reject                  { reason }
+//   POST   /api/v1/flows/:instance_id/complete   { output }
+//   POST   /api/v1/flows/:instance_id/input      { input }
+//   POST   /api/v1/flows/:instance_id/reject     { reason }
 //
+// Template CRUD and the transitions sub-resource live in
+// `flow-templates-api.ts`; both modules share `flow-model`'s normalisers.
 // The prefix is centralised so it can be aligned with `src/facet/client.gleam`
 // (which uses unprefixed paths) without touching every call site.
 
@@ -17,17 +18,13 @@ import { api } from "./api";
 import {
 	normalizeAdvance,
 	normalizeState,
-	normalizeTemplate,
-	normalizeTemplateList,
 	type NormalizedAdvance,
 } from "./flow-model";
 import type {
 	FlowExecutionState,
-	FlowTemplate,
 } from "./types";
 
 export const API_PREFIX = "/api/v1";
-const TEMPLATES = `${API_PREFIX}/flow-templates`;
 const TASKS = `${API_PREFIX}/tasks`;
 const FLOWS = `${API_PREFIX}/flows`;
 
@@ -35,20 +32,14 @@ function encode(value: string): string {
 	return encodeURIComponent(value);
 }
 
-// ─── Templates ───────────────────────────────────────────────────────────────
-
-/**
- * List flow templates. Used by the template picker; the response may omit the
- * node graph, so `node_count`/`transition_count` are honoured when present.
- */
-export async function listTemplates(): Promise<FlowTemplate[]> {
-	const raw = await api.get<unknown>(TEMPLATES);
-	return normalizeTemplateList(raw);
-}
-
-export async function getTemplate(idOrSlug: string): Promise<FlowTemplate> {
-	const raw = await api.get<unknown>(`${TEMPLATES}/${encode(idOrSlug)}`);
-	return normalizeTemplate(raw);
+/** A 404 from the engine: `{ status: 404, message }` thrown by `api`. */
+function isNotFound(error: unknown): boolean {
+	return (
+		typeof error === "object" &&
+		error !== null &&
+		"status" in error &&
+		error.status === 404
+	);
 }
 
 // ─── Instances & execution ───────────────────────────────────────────────────
@@ -64,8 +55,7 @@ export async function getTaskFlow(
 		const raw = await api.get<unknown>(`${TASKS}/${encode(taskId)}/flow`);
 		return normalizeState(raw);
 	} catch (error) {
-		const status = (error as { status?: number } | null)?.status;
-		if (status === 404) return null;
+		if (isNotFound(error)) return null;
 		throw error;
 	}
 }
@@ -81,6 +71,17 @@ export async function startFlow(
 	return normalizeState(raw);
 }
 
+/**
+ * Detach a task from its flow instance and delete that instance
+ * (`DELETE /tasks/:id/flow`).
+ *
+ * The engine only allows this once the execution is terminal, so a `409`
+ * (`Cannot unassign flow: execution is <status>`) is surfaced to the caller.
+ */
+export async function unassignTaskFlow(taskId: string): Promise<void> {
+	await api.delete<unknown>(`${TASKS}/${encode(taskId)}/flow`);
+}
+
 /** Advance one engine step. Accepts the `{state, action}` or action-only shape. */
 export async function advanceFlow(
 	instanceId: string,
@@ -89,14 +90,18 @@ export async function advanceFlow(
 	return normalizeAdvance(raw);
 }
 
-/** Complete the given step with an output string. */
+/**
+ * Report the output of the running step and receive the next action.
+ *
+ * The engine identifies the step through the execution's `current_node_id`, so
+ * only the instance id and output are sent (`POST /flows/:id/complete`).
+ */
 export async function completeStep(
 	instanceId: string,
-	stepId: string,
 	output: string,
 ): Promise<NormalizedAdvance> {
 	const raw = await api.post<unknown>(
-		`${FLOWS}/${encode(instanceId)}/steps/${encode(stepId)}/complete`,
+		`${FLOWS}/${encode(instanceId)}/complete`,
 		{ output },
 	);
 	return normalizeAdvance(raw);

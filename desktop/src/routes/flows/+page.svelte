@@ -132,13 +132,16 @@
 				step by step.
 			</p>
 		</div>
-		<button
-			type="button"
-			class="btn btn-primary"
-			on:click={() => (pickerOpen = true)}
-		>
-			Choose template
-		</button>
+		<div class="head-actions">
+			<a class="btn" href="/flows/templates">Templates &amp; authoring</a>
+			<button
+				type="button"
+				class="btn btn-primary"
+				on:click={() => (pickerOpen = true)}
+			>
+				Choose template
+			</button>
+		</div>
 	</header>
 
 	<div class="toolbar">
@@ -223,12 +226,27 @@
 						{activeTemplate.description ? `— ${activeTemplate.description}` : ""}
 					</p>
 				</div>
-				{#if $awaitingInput}
-					<span class="pill pill-warn">awaiting input</span>
-				{:else if $terminal}
-					<span class="pill">finished</span>
-				{/if}
+				<div class="head-actions">
+					{#if $awaitingInput}
+						<span class="pill pill-warn">awaiting input</span>
+					{:else if $terminal}
+						<span class="pill">finished</span>
+					{/if}
+					<button
+						type="button"
+						class="btn"
+						disabled={$flowBusy}
+						on:click={() => flow.unassign()}
+					>
+						Unassign flow
+					</button>
+				</div>
 			</div>
+			<p class="muted">
+				Unassign deletes the instance once the execution is terminal; the engine
+				refuses with 409 while it is pending, running or awaiting input — reject it
+				first.
+			</p>
 
 			<FlowGraph
 				template={activeTemplate}
@@ -452,6 +470,13 @@
 		gap: 1rem;
 	}
 
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
 	.pill {
 		font-size: 0.72rem;
 		text-transform: uppercase;
@@ -573,6 +598,7 @@
 		font-size: 0.85rem;
 		font-weight: 600;
 		cursor: pointer;
+		text-decoration: none;
 	}
 
 	.btn-primary {
