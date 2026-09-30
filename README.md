@@ -159,6 +159,80 @@ scripts/build.sh --stub  # or with a real binary: scripts/build.sh
 values (binary name, preferred port, DB path). On macOS the database defaults to
 `~/Library/Application Support/Facet/crystalline.db`.
 
+#### Running the built app
+
+`scripts/build.sh --stub` leaves `desktop/src-tauri/target/release/bundle/macos/Facet.app`
+(~12.5 MB, arm64, unsigned). `Contents/MacOS/crystalline` is the sidecar **embedded at build
+time** — whatever `desktop/src-tauri/binaries/` held when `tauri build` ran, not something the
+app looks up at launch.
+
+Three scripts cover the run modes; all of them resolve the bundle (override with `FACET_APP`),
+write the app log under `/tmp`, and run in the foreground until the window closes or you press
+Ctrl-C (`--detach` returns to the shell and leaves the app running).
+
+```sh
+scripts/run-app-stub.sh          # stub mode — no engine required
+scripts/run-app-live.sh          # live mode — starts Crystalline, then the app
+scripts/smoke-app.sh [--live]    # non-interactive start/assert/quit check
+```
+
+**stub mode** — the app spawns the development stub (`scripts/crystalline-stub.mjs`, installed
+as `Contents/MacOS/crystalline`) and talks to it over localhost HTTP on port 8787, or the next
+free port (`CRYSTALLINE_PORT`). No engine, no checkout, no network.
+
+**live mode** — the real engine serves the app over HTTP:
+
+```sh
+cd ~/Documents/github/crystalline && \
+  CRYSTALLINE_DAEMON=0 CRYSTALLINE_DB=file:/tmp/facet-app-live.db PORT=5010 gleam run
+```
+
+`scripts/run-app-live.sh` runs exactly that (`CRYSTALLINE_DIR`, `CRYSTALLINE_PORT`,
+`CRYSTALLINE_DB` override it), waits for `http://127.0.0.1:5010/health`, then launches the app
+with `FACET_URL=http://127.0.0.1:5010`. `FACET_URL` is read **at run time** by the Rust shell
+(`determine_mode` in `desktop/src-tauri/src/sidecar.rs`); a non-empty value selects remote mode,
+so the app never spawns a sidecar and never forwards provider keys to it. The app's own log
+confirms it with `Remote mode: http://127.0.0.1:5010`. When the app exits, the script stops the
+engine it started (an engine that was already listening on the port is reused and left alone).
+
+Launching with `open -a` instead of the scripts does **not** inherit your shell environment, so
+live mode needs the variables passed explicitly: `open -a .../Facet.app --env
+FACET_URL=http://127.0.0.1:5010`. The scripts launch `Contents/MacOS/` directly for this reason.
+
+What each mode actually exercises:
+
+| UI area | stub mode | live mode |
+| --- | --- | --- |
+| Connection banner, reported version | stub's `/health` (`0.1.0-stub`) | engine's `/health` (`1.0.0`) |
+| Tasks: list, detail, create, edit, status, delete | yes | yes |
+| Dependencies / blockers | yes | yes |
+| Executions: history, active, session log | yes — seeded fixtures | yes — whatever the engine ran |
+| A task's flow state | yes — seeded | yes (404 while the task has no bound flow) |
+| Flow template browser | yes — seeded registry | yes — engine's templates |
+| Sections / code refs | `GET /tasks/:id/sections` is a hard 404 in the stub | yes |
+| Artifacts panel | route absent → request fails inline | yes |
+| Template authoring (create/edit/transitions) | not implemented → write fails | yes |
+| Flow controls (assign, advance, complete, input, reject) | not implemented | yes |
+| Settings / provider keys (OS keychain) | yes — native commands, backend-independent | yes |
+
+So the stub demonstrates the full read surface and the task-write path; anything it does not
+implement still renders, but its request fails and the UI shows the error inline.
+
+Embedded mode driven by the **real** engine is deliberately unsupported: `bundle.externalBin`
+carries a single file, and Crystalline is a Gleam/OTP release (a compiled `build/` tree plus an
+Erlang runtime), not one executable. Use live mode for a real engine.
+
+#### Gatekeeper
+
+A bundle built here has no quarantine attribute, so it opens normally; the flag appears only
+after the `.app` travels through a download, AirDrop or another machine. When macOS refuses to
+open it ("Apple cannot check it for malicious software") because the bundle is unsigned, either
+right-click the app in Finder → **Open** → **Open**, or clear the flag once:
+
+```sh
+xattr -dr com.apple.quarantine desktop/src-tauri/target/release/bundle/macos/Facet.app
+```
+
 #### Provider API keys
 
 The Settings screen (`/settings` in the sidebar) is the credential entry point for the
@@ -172,10 +246,13 @@ conventional environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FACET_URL` | `http://localhost:8787` | Crystalline base URL; when set, no sidecar is spawned |
-| `FACET_TOKEN` | — | Bearer token for a remote instance |
+| `FACET_URL` | unset → spawn the sidecar | Remote Crystalline base URL, read at run time; when set, no sidecar is spawned |
 | `CRYSTALLINE_PORT` | `8787` | Preferred sidecar port (a random free port is used if taken) |
 | `CRYSTALLINE_DB` | *platform data dir* | Override the sidecar database path |
+| `VITE_CRYSTALLINE_URL` | `http://localhost:8787` | Browser-only fallback base URL (ignored inside Tauri, where `FACET_URL`/the sidecar port decides) |
+| `VITE_CRYSTALLINE_TOKEN` | — | Bearer token compiled into the frontend at `npm run build` time; the desktop app has no run-time token variable. The local engine disables auth unless you set `CRYSTALLINE_API_TOKEN` on it |
+
+The CLI's `FACET_TOKEN` (see above) is a separate, run-time variable and is unaffected.
 
 ## Related
 
