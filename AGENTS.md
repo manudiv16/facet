@@ -8,6 +8,9 @@ variables — read it rather than duplicating that detail here.
 ## Validation commands
 
 - Gleam CLI (repo root): `gleam test`, `gleam build`.
+- Claude Code plugin skills (`integrations/claude-code/`): `gleam test` covers the
+  command drift suite; `scripts/check-skill-exec.sh` drives the real CLI against the
+  Crystalline stand-in.
 - Desktop frontend (`desktop/`): `npm install`, then `npm test` (Vitest),
   `npm run check` (svelte-check; 0 errors expected) and `npm run build`.
 - Tauri shell: run `scripts/dev-sidecar.sh` first, then `cd desktop/src-tauri && cargo build`.

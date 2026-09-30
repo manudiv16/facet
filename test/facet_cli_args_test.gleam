@@ -4,6 +4,7 @@ import facet/cli/args
 import facet/cli/types
 import facet/models
 import gleam/option.{None, Some}
+import gleam/string
 
 pub fn empty_args_is_a_usage_error_test() {
   let assert Error(message) = args.parse([])
@@ -352,4 +353,66 @@ pub fn double_dash_ends_flag_parsing_test() {
 pub fn unknown_flag_after_command_is_an_error_test() {
   let assert Error(message) = args.parse(["task", "list", "--nope"])
   assert message == "unknown flag: --nope"
+}
+
+// ─── task sections ──────────────────────────────────────────────────────────
+
+pub fn task_sections_parses_one_id_test() {
+  let assert Ok(invocation) = args.parse(["task", "sections", "task-1"])
+  assert invocation.command == types.TaskSections("task-1")
+}
+
+pub fn task_sections_requires_an_id_test() {
+  let assert Error(message) = args.parse(["task", "sections"])
+  assert message == "task sections expects a task id"
+}
+
+pub fn task_section_add_parses_type_and_content_test() {
+  let assert Ok(invocation) =
+    args.parse([
+      "task",
+      "section",
+      "add",
+      "task-1",
+      "--type",
+      "testing_criterion",
+      "--content",
+      "gleam test stays green",
+    ])
+  let assert types.TaskSectionAdd(id, add) = invocation.command
+  assert id == "task-1"
+  assert add.section_type == models.TestingCriterion
+  assert add.content == "gleam test stays green"
+}
+
+pub fn task_section_add_requires_a_type_test() {
+  let assert Error(message) =
+    args.parse(["task", "section", "add", "task-1", "--content", "Ship it"])
+  assert message == "task section add requires --type <section-type>"
+}
+
+pub fn task_section_add_requires_content_test() {
+  let assert Error(message) =
+    args.parse(["task", "section", "add", "task-1", "--type", "goal"])
+  assert message == "task section add requires --content <text>"
+}
+
+pub fn task_section_add_rejects_unknown_type_test() {
+  let assert Error(message) =
+    args.parse([
+      "task",
+      "section",
+      "add",
+      "task-1",
+      "--type",
+      "summary",
+      "--content",
+      "Ship it",
+    ])
+  assert string.contains(message, "invalid section type: summary")
+}
+
+pub fn unknown_task_section_subcommand_is_an_error_test() {
+  let assert Error(message) = args.parse(["task", "section", "remove", "s1"])
+  assert message == "unknown task section subcommand: remove"
 }

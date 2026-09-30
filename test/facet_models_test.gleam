@@ -216,3 +216,30 @@ fn result_map(result: Result(a, b), mapper: fn(a) -> c) -> Result(c, b) {
     Error(error) -> Error(error)
   }
 }
+
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+pub fn section_type_rejects_unknown_value_test() {
+  let assert Error(_) = json.parse("\"summary\"", models.decode_section_type())
+}
+
+pub fn section_round_trip_test() {
+  let section =
+    models.Section(
+      id: "sec-1",
+      task_id: "task-1",
+      section_type: models.TestingCriterion,
+      content: "gleam test stays green",
+      order: 3,
+    )
+  let encoded = models.encode_section(section) |> models.encode_json
+  let assert Ok(decoded) = json.parse(encoded, models.decode_section())
+  assert decoded == section
+}
+
+pub fn section_create_encodes_type_and_content_test() {
+  let body =
+    models.SectionCreate(section_type: models.Goal, content: "Ship the release")
+  assert models.encode_json(models.encode_section_create(body))
+    == "{\"section_type\":\"goal\",\"content\":\"Ship the release\"}"
+}

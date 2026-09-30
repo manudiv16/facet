@@ -801,6 +801,97 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   decode_task()
 }
 
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+/// The role a section plays in a task's description. Mirrors the
+/// `section_type` column of Crystalline's sections table (crystalline#16).
+pub type SectionType {
+  Goal
+  Context
+  CurrentBehavior
+  DesiredBehavior
+  ChecklistItem
+  TestingCriterion
+  Constraint
+  AntiPattern
+  FailureTest
+}
+
+pub fn section_type_to_string(section_type: SectionType) -> String {
+  case section_type {
+    Goal -> "goal"
+    Context -> "context"
+    CurrentBehavior -> "current_behavior"
+    DesiredBehavior -> "desired_behavior"
+    ChecklistItem -> "checklist_item"
+    TestingCriterion -> "testing_criterion"
+    Constraint -> "constraint"
+    AntiPattern -> "anti_pattern"
+    FailureTest -> "failure_test"
+  }
+}
+
+pub fn section_type_from_string(value: String) -> Result(SectionType, String) {
+  case value {
+    "goal" -> Ok(Goal)
+    "context" -> Ok(Context)
+    "current_behavior" -> Ok(CurrentBehavior)
+    "desired_behavior" -> Ok(DesiredBehavior)
+    "checklist_item" -> Ok(ChecklistItem)
+    "testing_criterion" -> Ok(TestingCriterion)
+    "constraint" -> Ok(Constraint)
+    "anti_pattern" -> Ok(AntiPattern)
+    "failure_test" -> Ok(FailureTest)
+    _ -> Error(value)
+  }
+}
+
+pub fn encode_section_type(section_type: SectionType) -> json.Json {
+  json.string(section_type_to_string(section_type))
+}
+
+pub fn decode_section_type() -> decode.Decoder(SectionType) {
+  strict_enum(section_type_from_string, Goal, "SectionType")
+}
+
+pub fn section_type_decoder() -> decode.Decoder(SectionType) {
+  decode_section_type()
+}
+
+/// A structured part of a task's description.
+pub type Section {
+  Section(
+    id: String,
+    task_id: String,
+    section_type: SectionType,
+    content: String,
+    order: Int,
+  )
+}
+
+pub fn encode_section(section: Section) -> json.Json {
+  json.object([
+    #("id", json.string(section.id)),
+    #("task_id", json.string(section.task_id)),
+    #("section_type", encode_section_type(section.section_type)),
+    #("content", json.string(section.content)),
+    #("order", json.int(section.order)),
+  ])
+}
+
+pub fn decode_section() -> decode.Decoder(Section) {
+  use id <- decode.field("id", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use section_type <- decode.field("section_type", decode_section_type())
+  use content <- decode.optional_field("content", "", decode.string)
+  use order <- decode.optional_field("order", 0, decode.int)
+  decode.success(Section(id:, task_id:, section_type:, content:, order:))
+}
+
+pub fn section_decoder() -> decode.Decoder(Section) {
+  decode_section()
+}
+
 // ─── Execution models ───────────────────────────────────────────────────────
 
 pub type StepExecution {
@@ -1309,6 +1400,19 @@ pub fn task_filters_to_query(filters: TaskFilters) -> List(#(String, String)) {
     None -> params
   }
   params
+}
+
+/// Body for `POST /api/v1/tasks/:id/sections` — the type and text of the new
+/// section; the engine assigns `id`, `task_id` and `order`.
+pub type SectionCreate {
+  SectionCreate(section_type: SectionType, content: String)
+}
+
+pub fn encode_section_create(body: SectionCreate) -> json.Json {
+  json.object([
+    #("section_type", encode_section_type(body.section_type)),
+    #("content", json.string(body.content)),
+  ])
 }
 
 pub type StartFlowRequest {
