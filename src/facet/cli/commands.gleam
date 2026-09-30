@@ -80,22 +80,22 @@ pub fn run(config: Config, command: Command) -> Result(Output, types.CliError) {
       |> as_output(types.TemplateShown)
     types.FlowStart(task_id, template_id) ->
       client.start_flow(config, task_id, template_id)
-      |> as_output(fn(instance) { types.FlowStarted(instance, task_id) })
+      |> as_output(types.FlowStarted)
     types.FlowStatus(instance_id) ->
       client.get_flow_state(config, instance_id)
       |> as_output(types.FlowStatusShown)
     types.FlowAdvance(instance_id) ->
       client.advance_flow(config, instance_id)
-      |> as_output(fn(action) { types.FlowAdvanced(instance_id, action) })
+      |> as_output(types.FlowAdvanced)
     types.FlowCompleteStep(instance_id, step_id, output) ->
-      client.complete_step(config, instance_id, step_id, output)
-      |> as_output(fn(state) { types.StepCompleted(step_id, state) })
+      client.complete_step(config, instance_id, output)
+      |> as_output(fn(step) { types.StepCompleted(step_id, step) })
     types.FlowInput(instance_id, input) ->
       client.provide_input(config, instance_id, input)
-      |> as_output(fn(state) { types.InputProvided(instance_id, state) })
+      |> as_output(types.InputProvided)
     types.FlowReject(instance_id, reason) ->
       client.reject_flow(config, instance_id, default_reason(reason))
-      |> as_output(fn(state) { types.FlowRejected(instance_id, state) })
+      |> as_output(types.FlowRejected)
     types.ExecHistory(task_id) ->
       client.execution_history(config, task_id)
       |> as_output(fn(steps) { types.ExecHistoryShown(task_id, steps) })

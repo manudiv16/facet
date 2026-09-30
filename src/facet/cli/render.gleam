@@ -74,26 +74,32 @@ pub fn render(output: Output) -> String {
       "artifact deleted: " <> logical_name <> " (" <> task_id <> ")"
     types.TemplatesListed(templates) -> render_template_table(templates)
     types.TemplateShown(template) -> render_template(template)
-    types.FlowStarted(instance, task_id) ->
+    types.FlowStarted(started) ->
       "flow started:\n"
       <> render_lines([
-        #("instance", instance.id),
-        #("template", instance.template_id),
-        #("task", task_id),
-        #("initial node", instance.initial_node_id),
+        #("instance", started.instance.id),
+        #("template", started.instance.template_id),
+        #("task", started.instance.task_id),
+        #("status", models.execution_status_to_string(started.execution.status)),
+        #("initial node", started.instance.initial_node_id),
       ])
     types.FlowStatusShown(state) -> render_state(state)
-    types.FlowAdvanced(instance_id, action) ->
-      render_action(instance_id, action)
-    types.StepCompleted(step_id, state) ->
-      "step completed: " <> step_id <> "\n" <> render_state(state)
-    types.InputProvided(instance_id, state) ->
-      "input provided for instance "
-      <> instance_id
+    types.FlowAdvanced(step) -> render_action(step.execution, step.action)
+    types.StepCompleted(step_id, step) ->
+      "step completed: "
+      <> step_id
       <> "\n"
-      <> render_state(state)
-    types.FlowRejected(instance_id, state) ->
-      "flow rejected: " <> instance_id <> "\n" <> render_state(state)
+      <> render_action(step.execution, step.action)
+    types.InputProvided(step) ->
+      "input provided for instance "
+      <> step.execution.instance_id
+      <> "\n"
+      <> render_action(step.execution, step.action)
+    types.FlowRejected(step) ->
+      "flow rejected: "
+      <> step.execution.instance_id
+      <> "\n"
+      <> render_action(step.execution, step.action)
     types.ExecHistoryShown(task_id, steps) ->
       "executions of " <> task_id <> ":\n" <> render_step_table(steps)
     types.ExecShown(step) -> render_step(step)
@@ -466,11 +472,19 @@ fn dict_to_string(values: Dict(String, String)) -> String {
   "{" <> string.join(sorted, ", ") <> "}"
 }
 
-fn render_action(instance_id: String, action: models.Action) -> String {
+/// Render one engine action plus the command that continues the flow. The
+/// instance id comes from the engine's execution summary, so the printed
+/// "next" command is always the one the engine answered for.
+fn render_action(
+  execution: models.ExecutionSummary,
+  action: models.Action,
+) -> String {
+  let instance_id = execution.instance_id
   case action {
     models.RunStep(node:, prompt:) ->
       render_lines([
         #("action", "run_step"),
+        #("instance", instance_id),
         #("node", node.id <> " (" <> node.name <> ")"),
         #("goal", node.goal),
         #("prompt", prompt),
@@ -484,6 +498,7 @@ fn render_action(instance_id: String, action: models.Action) -> String {
     models.AwaitInput(node:) ->
       render_lines([
         #("action", "await_input"),
+        #("instance", instance_id),
         #("node", node.id <> " (" <> node.name <> ")"),
         #("goal", node.goal),
       ])
@@ -494,6 +509,7 @@ fn render_action(instance_id: String, action: models.Action) -> String {
     models.RunParallel(children:) ->
       render_lines([
         #("action", "run_parallel"),
+        #("instance", instance_id),
         #("children", int.to_string(list.length(children))),
       ])
       <> "next: advance again once the parallel steps are done:\n"
@@ -513,9 +529,7 @@ fn render_action(instance_id: String, action: models.Action) -> String {
         #("instance", instance_id),
       ])
       <> "next: the flow was rejected; the task stays blocked:\n"
-      <> "  facet flow status "
-      <> instance_id
-      <> "\n"
+      <> "  facet task show <task-id>\n"
     models.ExecutionError(message:) ->
       render_lines([
         #("action", "execution_error"),
@@ -649,7 +663,7 @@ fn json_of(output: Output) -> json.Json {
     types.FlowCancelled(instance_id, state) ->
       json.object([
         #("instance_id", json.string(instance_id)),
-        #("state", models.encode_execution_state(state)),
+        #("state", models.encode_execution_summary(state)),
       ])
     types.TaskCreated(task) -> models.encode_task(task)
     types.TaskShown(task) -> models.encode_task(task)
@@ -698,33 +712,17 @@ fn json_of(output: Output) -> json.Json {
     types.TemplatesListed(templates) ->
       json.array(templates, models.encode_flow_template)
     types.TemplateShown(template) -> models.encode_flow_template(template)
-    types.FlowStarted(instance, task_id) ->
-      json.object([
-        #("instance", models.encode_flow_instance(instance)),
-        #("task_id", json.string(task_id)),
-      ])
+    types.FlowStarted(started) -> models.encode_flow_instantiation(started)
     types.FlowStatusShown(state) -> models.encode_execution_state(state)
-    types.FlowAdvanced(instance_id, action) ->
+    types.FlowAdvanced(step) -> models.encode_execution_step(step)
+    types.StepCompleted(step_id, step) ->
       json.object([
-        #("instance_id", json.string(instance_id)),
-        #("action", models.encode_action(action)),
-      ])
-    types.StepCompleted(step_id, state) ->
-      json.object([
-        #("instance_id", json.string(state.flow_instance.id)),
         #("step_id", json.string(step_id)),
-        #("state", models.encode_execution_state(state)),
+        #("execution", models.encode_execution_summary(step.execution)),
+        #("action", models.encode_action(step.action)),
       ])
-    types.InputProvided(instance_id, state) ->
-      json.object([
-        #("instance_id", json.string(instance_id)),
-        #("state", models.encode_execution_state(state)),
-      ])
-    types.FlowRejected(instance_id, state) ->
-      json.object([
-        #("instance_id", json.string(instance_id)),
-        #("state", models.encode_execution_state(state)),
-      ])
+    types.InputProvided(step) -> models.encode_execution_step(step)
+    types.FlowRejected(step) -> models.encode_execution_step(step)
     types.ExecHistoryShown(task_id, steps) ->
       json.object([
         #("task_id", json.string(task_id)),

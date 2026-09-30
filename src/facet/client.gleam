@@ -292,6 +292,14 @@ pub fn get_template(
 
 /// `GET /api/v1/flows/:instance_id` — current execution state of a flow
 /// instance (status, current node, step history, variables).
+///
+/// NOTE (facet#14): Crystalline registers no instance-addressed read. Its
+/// flow routes address instances through their task
+/// (`GET /api/v1/tasks/:task_id/flow`, which answers the
+/// `{"instance","execution"}` envelope), so `facet flow status <instance-id>`
+/// answers 404 until the engine grows the route. The client cannot derive the
+/// task from the instance alone, so this stays as the declared contract rather
+/// than being silently redirected.
 pub fn get_flow_state(
   config: Config,
   instance_id: String,
@@ -304,12 +312,14 @@ pub fn get_flow_state(
   expect_json(config, req, models.decode_execution_state())
 }
 
-/// `POST /api/v1/tasks/:task_id/flow`
+/// `POST /api/v1/tasks/:task_id/flow` — 201 with the
+/// `{"instance", "execution"}` envelope: the new (pending) instance and the
+/// execution row created for it.
 pub fn start_flow(
   config: Config,
   task_id: String,
   template_id: String,
-) -> Result(models.FlowInstance, ClientError) {
+) -> Result(models.FlowInstantiation, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -319,52 +329,52 @@ pub fn start_flow(
   |> json_body(
     models.encode_start_flow_request(models.StartFlowRequest(template_id:)),
   )
-  |> expect_json(config, _, models.decode_flow_instance())
+  |> expect_json(config, _, models.decode_flow_instantiation())
 }
 
-/// `POST /api/v1/flows/:instance_id/advance` — returns the engine `Action`.
+/// `POST /api/v1/flows/:instance_id/advance` — the `{"execution", "action"}`
+/// envelope: the state after the step and the next engine `Action`.
 pub fn advance_flow(
   config: Config,
   instance_id: String,
-) -> Result(models.Action, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
     api_prefix <> "/flows/" <> path_segment(instance_id) <> "/advance",
   ))
-  expect_json(config, req, models.decode_action())
+  expect_json(config, req, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/steps/:step_id/complete`
+/// `POST /api/v1/flows/:instance_id/complete` — report the running step's
+/// output and receive the next `{"execution", "action"}` envelope.
+///
+/// The engine identifies the step through the execution's `current_node_id`,
+/// so the request carries only the output; the step id is the caller's.
 pub fn complete_step(
   config: Config,
   instance_id: String,
-  step_id: String,
   output: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
-    api_prefix
-      <> "/flows/"
-      <> path_segment(instance_id)
-      <> "/steps/"
-      <> path_segment(step_id)
-      <> "/complete",
+    api_prefix <> "/flows/" <> path_segment(instance_id) <> "/complete",
   ))
   req
   |> json_body(
     models.encode_complete_step_request(models.CompleteStepRequest(output:)),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/input`
+/// `POST /api/v1/flows/:instance_id/input` — resume from `awaiting_input`
+/// with the human's text; answers the `{"execution", "action"}` envelope.
 pub fn provide_input(
   config: Config,
   instance_id: String,
   input_text: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -376,15 +386,16 @@ pub fn provide_input(
       input: input_text,
     )),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
 }
 
-/// `POST /api/v1/flows/:instance_id/reject`
+/// `POST /api/v1/flows/:instance_id/reject` — mark the execution rejected;
+/// answers the `{"execution", "action": {"type": "flow_reject"}}` envelope.
 pub fn reject_flow(
   config: Config,
   instance_id: String,
   reason: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionStep, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
@@ -394,22 +405,23 @@ pub fn reject_flow(
   |> json_body(
     models.encode_reject_flow_request(models.RejectFlowRequest(reason:)),
   )
-  |> expect_json(config, _, models.decode_execution_state())
+  |> expect_json(config, _, models.decode_execution_step())
 }
 
 /// `POST /api/v1/flows/:instance_id/cancel` — 200 with the cancelled
 /// execution; 409 when the execution is pending or already terminal, with the
-/// status named in the error body.
+/// status named in the error body. Unlike the step routes this answers the
+/// execution body bare.
 pub fn cancel_flow(
   config: Config,
   instance_id: String,
-) -> Result(models.ExecutionState, ClientError) {
+) -> Result(models.ExecutionSummary, ClientError) {
   use req <- result.try(base_request(
     config,
     http.Post,
     api_prefix <> "/flows/" <> path_segment(instance_id) <> "/cancel",
   ))
-  expect_json(config, req, models.decode_execution_state())
+  expect_json(config, req, models.decode_execution_summary())
 }
 
 // ─── Executions ─────────────────────────────────────────────────────────────

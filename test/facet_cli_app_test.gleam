@@ -5,16 +5,21 @@
 
 import facet/cli/app
 import facet/cli/commands
+import facet/cli/render
 import facet/cli/types
 import facet/config
 import facet/ffi
 import facet/models
+import gleam/dict
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+
+@external(erlang, "facet_stderr", "capture")
+fn capture_stderr(run: fn() -> a) -> #(a, String)
 
 @external(erlang, "facet_stub_server", "start_capture")
 fn stub_start_capture(
@@ -37,20 +42,55 @@ fn stub_get_all(collector: dynamic.Dynamic) -> dynamic.Dynamic
 fn stub_get_headers(collector: dynamic.Dynamic) -> dynamic.Dynamic
 
 // ─── Wire-format fixtures ───────────────────────────────────────────────────
+//
+// Flow fixtures mirror Crystalline's `http/routes/flows.gleam` verbatim: the
+// template/instance node graphs travel as arrays, `POST /tasks/:id/flow`
+// answers `{"instance","execution"}`, and every step route answers
+// `{"execution","action"}` with the action tagged `"type"`.
 
 const task_json = "{\"id\":\"task-1\",\"short_id\":\"00000001\",\"title\":\"T\",\"description\":\"\",\"level\":\"ticket\",\"priority\":\"medium\",\"status\":\"todo\",\"tags\":[],\"parent_id\":null,\"archived\":false,\"created_at\":1,\"updated_at\":2}"
 
 const blocked_task_json = "{\"id\":\"task-2\",\"short_id\":\"00000002\",\"title\":\"Dependent\",\"description\":\"\",\"level\":\"ticket\",\"priority\":\"low\",\"status\":\"blocked\",\"tags\":[],\"parent_id\":null,\"archived\":false,\"created_at\":1,\"updated_at\":2}"
 
-const template_json = "{\"id\":\"linear\",\"name\":\"Linear\",\"description\":\"\",\"nodes\":{},\"transitions\":[],\"initial_node_id\":\"n1\"}"
+const node_json = "{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand the problem\",\"prompt\":\"do it\"}"
 
-const instance_json = "{\"id\":\"flow-1\",\"template_id\":\"linear\",\"task_id\":\"task-1\",\"nodes\":{},\"transitions\":[],\"initial_node_id\":\"n1\"}"
+const input_node_json = "{\"id\":\"n3\",\"name\":\"Confirm\",\"node_type\":\"human_input\",\"goal\":\"Get confirmation\"}"
+
+/// `GET /flow-templates` — summaries: no graph, just counts.
+const template_summary_json = "{\"id\":\"linear\",\"slug\":\"linear\",\"name\":\"Linear\",\"description\":\"\",\"initial_node_id\":\"n1\",\"node_count\":1,\"transition_count\":0}"
+
+/// `GET /flow-templates/:id` — the full template, nodes as an array.
+const template_json = "{\"id\":\"linear\",\"slug\":\"linear\",\"name\":\"Linear\",\"description\":\"\",\"initial_node_id\":\"n1\",\"nodes\":["
+  <> node_json
+  <> "],\"transitions\":[],\"on_done_template_id\":null,\"on_reject_template_id\":null}"
+
+const instance_json = "{\"id\":\"flow-1\",\"template_id\":\"linear\",\"task_id\":\"task-1\",\"initial_node_id\":\"n1\",\"nodes\":["
+  <> node_json
+  <> "],\"transitions\":[],\"on_done_template_id\":null,\"on_reject_template_id\":null}"
+
+const pending_execution_json = "{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"pending\",\"current_node_id\":null,\"started_at\":null,\"completed_at\":null}"
+
+const running_execution_json = "{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"running\",\"current_node_id\":\"n1\",\"started_at\":5,\"completed_at\":null}"
+
+const awaiting_execution_json = "{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"awaiting_input\",\"current_node_id\":\"n3\",\"started_at\":5,\"completed_at\":null}"
+
+const completed_execution_json = "{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"completed\",\"current_node_id\":\"n2\",\"started_at\":5,\"completed_at\":30}"
+
+const run_step_action_json = "{\"type\":\"run_step\",\"node\":"
+  <> node_json
+  <> ",\"prompt\":\"do it\"}"
+
+const await_input_action_json = "{\"type\":\"await_input\",\"node\":"
+  <> input_node_json
+  <> "}"
+
+const complete_action_json = "{\"type\":\"flow_complete\"}"
+
+const reject_action_json = "{\"type\":\"flow_reject\"}"
 
 const state_json = "{\"id\":\"state-1\",\"status\":\"running\",\"task_id\":\"task-1\"}"
 
 const step_json = "{\"id\":\"step-1\",\"status\":\"completed\",\"node_id\":\"n1\",\"task_id\":\"task-1\"}"
-
-const run_step_action_json = "{\"kind\":\"run_step\",\"node\":{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\"},\"prompt\":\"do it\"}"
 
 const log_json = "{\"id\":\"log-1\",\"event_type\":\"text\",\"payload\":\"{}\",\"sequence\":1}"
 
@@ -60,7 +100,7 @@ const project_json = "{\"id\":\"proj-1\",\"slug\":\"acme\",\"name\":\"Acme\",\"d
 
 const artifact_json = "{\"id\":\"art-1\",\"task_id\":\"task-1\",\"logical_name\":\"plan.json\",\"content\":{\"ok\":true},\"created_at\":1,\"updated_at\":2}"
 
-const cancelled_state_json = "{\"id\":\"state-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"cancelled\",\"completed_at\":99}"
+const cancelled_state_json = "{\"id\":\"state-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"cancelled\",\"current_node_id\":null,\"started_at\":5,\"completed_at\":99}"
 
 // ─── health ─────────────────────────────────────────────────────────────────
 
@@ -286,30 +326,51 @@ pub fn task_sections_engine_without_api_is_readable_error_test() {
 
 pub fn flow_templates_hits_templates_endpoint_test() {
   let #(_listener, port, collector) =
-    stub_start_capture(200, "[" <> template_json <> "]")
+    stub_start_capture(200, "[" <> template_summary_json <> "]")
   let config = loopback(port)
   let assert Ok(types.TemplatesListed(templates)) =
     commands_run(config, types.FlowTemplates)
-  assert templates == [decoded_template()]
+  assert templates == [decoded_summary_template()]
   assert captured(collector) == ["GET", "/api/v1/flow-templates", ""]
 }
 
-pub fn flow_template_show_hits_one_endpoint_test() {
+pub fn flow_template_show_decodes_the_engine_node_array_test() {
+  // The engine serialises the graph as an array of nodes; the CLI keeps it
+  // keyed by node id.
   let #(_listener, port, collector) = stub_start_capture(200, template_json)
   let config = loopback(port)
   let assert Ok(types.TemplateShown(template)) =
     commands_run(config, types.FlowTemplateShow("linear"))
   assert template.id == "linear"
+  assert template.initial_node_id == "n1"
+  let assert Ok(node) = dict.get(template.nodes, "n1")
+  assert node.name == "Research"
+  assert node.goal == "Understand the problem"
   assert captured(collector) == ["GET", "/api/v1/flow-templates/linear", ""]
 }
 
-pub fn flow_start_posts_flow_endpoint_test() {
-  let #(_listener, port, collector) = stub_start_capture(201, instance_json)
+pub fn flow_start_decodes_the_instance_execution_envelope_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(
+      201,
+      "{\"instance\":"
+        <> instance_json
+        <> ",\"execution\":"
+        <> pending_execution_json
+        <> "}",
+    )
   let config = loopback(port)
-  let assert Ok(types.FlowStarted(instance, task_id)) =
+  let assert Ok(types.FlowStarted(started)) =
     commands_run(config, types.FlowStart("task-1", "linear"))
-  assert instance.id == "flow-1"
-  assert task_id == "task-1"
+  assert started.instance.id == "flow-1"
+  assert started.instance.template_id == "linear"
+  assert started.instance.task_id == "task-1"
+  assert started.execution.status == models.ExecPending
+  assert started.execution.instance_id == "flow-1"
+  // The human render names the instance and its status.
+  let rendered = render.render(types.FlowStarted(started))
+  assert string.contains(rendered, "flow-1")
+  assert string.contains(rendered, "pending")
   assert captured(collector)
     == [
       "POST",
@@ -328,40 +389,119 @@ pub fn flow_status_hits_flow_endpoint_test() {
   assert captured(collector) == ["GET", "/api/v1/flows/flow-1", ""]
 }
 
-pub fn flow_advance_hits_advance_endpoint_and_decodes_action_test() {
+pub fn flow_advance_decodes_the_execution_step_envelope_test() {
   let #(_listener, port, collector) =
-    stub_start_capture(200, run_step_action_json)
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> running_execution_json
+        <> ",\"action\":"
+        <> run_step_action_json
+        <> "}",
+    )
   let config = loopback(port)
-  let assert Ok(types.FlowAdvanced(instance_id, action)) =
+  let assert Ok(types.FlowAdvanced(step)) =
     commands_run(config, types.FlowAdvance("flow-1"))
-  assert instance_id == "flow-1"
-  let assert models.RunStep(node, prompt) = action
+  assert step.execution.status == models.ExecRunning
+  assert step.execution.instance_id == "flow-1"
+  let assert models.RunStep(node, prompt) = step.action
   assert node.id == "n1"
   assert node.name == "Research"
   assert prompt == "do it"
+  // The action type and its node reach the human render.
+  let rendered = render.render(types.FlowAdvanced(step))
+  assert string.contains(rendered, "run_step")
+  assert string.contains(rendered, "n1 (Research)")
+  assert string.contains(
+    rendered,
+    "facet flow complete-step flow-1 n1 --output",
+  )
   assert captured(collector) == ["POST", "/api/v1/flows/flow-1/advance", ""]
 }
 
-pub fn flow_complete_step_posts_output_test() {
-  let #(_listener, port, collector) = stub_start_capture(200, state_json)
+pub fn flow_advance_flow_complete_is_terminal_test() {
+  let #(_listener, port, _collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> completed_execution_json
+        <> ",\"action\":"
+        <> complete_action_json
+        <> "}",
+    )
   let config = loopback(port)
-  let assert Ok(types.StepCompleted(step_id, _)) =
+  let assert Ok(types.FlowAdvanced(step)) =
+    commands_run(config, types.FlowAdvance("flow-1"))
+  assert step.execution.status == models.ExecCompleted
+  assert step.action == models.FlowComplete
+  let rendered = render.render(types.FlowAdvanced(step))
+  assert string.contains(rendered, "flow_complete")
+  assert string.contains(rendered, "the flow finished")
+}
+
+pub fn flow_advance_await_input_carries_the_human_node_test() {
+  let #(_listener, port, _collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> awaiting_execution_json
+        <> ",\"action\":"
+        <> await_input_action_json
+        <> "}",
+    )
+  let config = loopback(port)
+  let assert Ok(types.FlowAdvanced(step)) =
+    commands_run(config, types.FlowAdvance("flow-1"))
+  assert step.execution.status == models.ExecAwaitingInput
+  let assert models.AwaitInput(node) = step.action
+  assert node.id == "n3"
+  assert node.node_type == models.HumanInput
+  let rendered = render.render(types.FlowAdvanced(step))
+  assert string.contains(rendered, "await_input")
+  assert string.contains(rendered, "facet flow input flow-1 \"<text>\"")
+}
+
+pub fn flow_complete_step_posts_output_to_the_instance_route_test() {
+  // The engine identifies the step from the execution's current node, so the
+  // path carries the instance only.
+  let #(_listener, port, collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> completed_execution_json
+        <> ",\"action\":"
+        <> complete_action_json
+        <> "}",
+    )
+  let config = loopback(port)
+  let assert Ok(types.StepCompleted(step_id, step)) =
     commands_run(config, types.FlowCompleteStep("flow-1", "n1", "done"))
   assert step_id == "n1"
+  assert step.action == models.FlowComplete
+  assert step.execution.status == models.ExecCompleted
   assert captured(collector)
     == [
       "POST",
-      "/api/v1/flows/flow-1/steps/n1/complete",
+      "/api/v1/flows/flow-1/complete",
       "{\"output\":\"done\"}",
     ]
 }
 
-pub fn flow_input_posts_input_test() {
-  let #(_listener, port, collector) = stub_start_capture(200, state_json)
+pub fn flow_input_posts_input_and_decodes_the_next_action_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> running_execution_json
+        <> ",\"action\":"
+        <> run_step_action_json
+        <> "}",
+    )
   let config = loopback(port)
-  let assert Ok(types.InputProvided(instance_id, _)) =
+  let assert Ok(types.InputProvided(step)) =
     commands_run(config, types.FlowInput("flow-1", "approved"))
-  assert instance_id == "flow-1"
+  let assert models.RunStep(node, _) = step.action
+  assert node.id == "n1"
   assert captured(collector)
     == [
       "POST",
@@ -371,11 +511,22 @@ pub fn flow_input_posts_input_test() {
 }
 
 pub fn flow_reject_posts_reason_test() {
-  let #(_listener, port, collector) = stub_start_capture(200, state_json)
+  let #(_listener, port, collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> completed_execution_json
+        <> ",\"action\":"
+        <> reject_action_json
+        <> "}",
+    )
   let config = loopback(port)
-  let assert Ok(types.FlowRejected(instance_id, _)) =
+  let assert Ok(types.FlowRejected(step)) =
     commands_run(config, types.FlowReject("flow-1", Some("out of scope")))
-  assert instance_id == "flow-1"
+  assert step.action == models.FlowReject
+  assert step.execution.instance_id == "flow-1"
+  let rendered = render.render(types.FlowRejected(step))
+  assert string.contains(rendered, "flow rejected: flow-1")
   assert captured(collector)
     == [
       "POST",
@@ -385,7 +536,15 @@ pub fn flow_reject_posts_reason_test() {
 }
 
 pub fn flow_reject_defaults_reason_test() {
-  let #(_listener, port, collector) = stub_start_capture(200, state_json)
+  let #(_listener, port, collector) =
+    stub_start_capture(
+      200,
+      "{\"execution\":"
+        <> completed_execution_json
+        <> ",\"action\":"
+        <> reject_action_json
+        <> "}",
+    )
   let config = loopback(port)
   let assert Ok(_) = commands_run(config, types.FlowReject("flow-1", None))
   assert captured(collector)
@@ -394,6 +553,20 @@ pub fn flow_reject_defaults_reason_test() {
       "/api/v1/flows/flow-1/reject",
       "{\"reason\":\"Rejected via the facet CLI\"}",
     ]
+}
+
+pub fn flow_advance_on_an_unknown_instance_reports_the_engine_error_test() {
+  // A 404 with the engine's JSON error body: exit 1, and the engine's message
+  // on stderr (nothing on stdout).
+  let #(_listener, port, _collector) =
+    stub_start_capture(404, "{\"error\":\"Flow instance not found: flow-9\"}")
+  let url = "http://127.0.0.1:" <> int.to_string(port)
+  let #(exit_code, stderr) =
+    capture_stderr(fn() {
+      app.main(["--url", url, "flow", "advance", "flow-9"])
+    })
+  assert exit_code == 1
+  assert string.contains(stderr, "Flow instance not found: flow-9")
 }
 
 // ─── exec ───────────────────────────────────────────────────────────────────
@@ -976,9 +1149,9 @@ fn decoded_blocked_task() -> models.Task {
   task
 }
 
-fn decoded_template() -> models.FlowTemplate {
+fn decoded_summary_template() -> models.FlowTemplate {
   let assert Ok(template) =
-    models.decode_json(template_json, models.decode_flow_template())
+    models.decode_json(template_summary_json, models.decode_flow_template())
   template
 }
 
