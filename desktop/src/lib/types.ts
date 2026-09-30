@@ -422,3 +422,46 @@ export interface Section {
 	order: number;
 	checklist_state?: ChecklistState | null;
 }
+
+/** Fields accepted by `POST /api/v1/tasks/:task_id/sections`. */
+export interface SectionCreateInput {
+	section_type: SectionType;
+	content: string;
+	code_ref?: CodeRef | null;
+	/** Defaults to the next free position for the task when omitted. */
+	order?: number;
+	checklist_state?: ChecklistState | null;
+}
+
+/**
+ * Partial update accepted by `PATCH /api/v1/sections/:id`.
+ *
+ * `code_ref` and `checklist_state` are tri-state on the wire: `null` clears
+ * them, unlike an omitted key which leaves the stored value untouched.
+ */
+export interface SectionUpdateInput {
+	section_type?: SectionType;
+	content?: string;
+	order?: number;
+	code_ref?: CodeRef | null;
+	checklist_state?: ChecklistState | null;
+}
+
+// ─── Task artifacts (named JSON blobs) ──────────────────────────────────────
+
+/**
+ * One named JSON artifact of a task, as returned by
+ * `GET /api/v1/tasks/:task_id/artifacts` (Crystalline artifacts routes).
+ *
+ * `content` is whatever JSON the creator stored — an object, array, string,
+ * number, boolean or null — and is rendered verbatim by the artifacts panel.
+ */
+export interface Artifact {
+	id: string;
+	task_id: string;
+	logical_name: string;
+	content: unknown;
+	/** Unix epoch seconds, matching the task timestamp convention. */
+	created_at: number;
+	updated_at: number;
+}

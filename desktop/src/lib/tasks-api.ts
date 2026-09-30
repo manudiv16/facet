@@ -15,7 +15,6 @@
 // (which keeps the same `/api/v1` convention) without touching every call site.
 import { api } from "./api";
 import type {
-	Section,
 	Task,
 	TaskCreate,
 	TaskLevel,
@@ -135,15 +134,4 @@ export async function getBlockers(taskId: string): Promise<Task[]> {
 		`${TASKS}/${encodeURIComponent(taskId)}/blockers`,
 	);
 	return raw.map((task) => normalizeTask(task as Partial<Task> & { id: string }));
-}
-
-/**
- * Structured sections for a task. Crystalline does not expose this route yet,
- * so callers must tolerate failure (the detail view shows an explicit
- * "unavailable" state rather than breaking).
- */
-export async function listSections(taskId: string): Promise<Section[]> {
-	return api.get<Section[]>(
-		`${TASKS}/${encodeURIComponent(taskId)}/sections`,
-	);
 }
