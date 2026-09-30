@@ -47,15 +47,23 @@ gleam build # Compile
 Command reference:
 
 ```
-facet [--url <base-url>] [--token <token>] [--json] <command> [args...]
+facet [--url <base-url>] [--token <token>] [--project <id|slug>] [--json] <command> [args...]
 
 facet health
+facet init <slug> [--name <name>]         # resolve/create a project and make it the default scope
+facet path <task-id>                      # ordered ancestor chain root -> task
+facet stop <instance-id>                  # cancel a running flow execution
 facet task add <title> [--level epic|ticket|task] [--priority low|medium|high|critical] [--tag <t>]
 facet task list [--ready] [--status <s>] [--limit <n>] [--offset <n>]
 facet task show <id> | update <id> [--flags] | delete <id> [--cascade]
 facet task depend <id> <depends-on> | undepend <id> <depends-on> | blockers <id>
 facet task sections <id>                  # GET /tasks/:id/sections (crystalline#16)
 facet task section add <id> --type <t> --content "<text>"
+facet task ref <id> <path> [--line-start N --line-end N --name X --description Y] [--type <t>] [--content <text>]
+facet task unref <id> <section-id>
+facet artifact <task-id> list
+facet artifact <task-id> get <name> | delete <name>
+facet artifact <task-id> put <name> --content <json|->   # `-` reads stdin
 facet flow templates         # or: flow templates show <id>
 facet flow start <task-id> <template-id>
 facet flow status <instance-id>
@@ -69,11 +77,60 @@ facet exec logs <exec-id> [--limit N] [--before SEQ]
 
 - `--ready` lists only unblocked tasks (`/tasks/ready`); `--json` switches to machine-readable output.
 - Flow commands implement the human-in-the-loop loop: `advance` prints the action and the next command to run.
+- `stop` cancels a `running` or `awaiting_input` execution and prints the cancelled execution. Pending
+  or already-terminal executions answer `409` naming their status, and a later `flow advance` answers
+  `409` with the engine's `…was cancelled` message verbatim.
 - `exec logs` pages newest-first; when a page fills up it suggests `--before <oldest sequence>` to continue.
 - Errors go to stderr as `facet: <message>` with exit status 1; success (and `--help`) exit 0.
 - The same commands are exposed to Claude Code as skills under
   [`integrations/claude-code/`](integrations/claude-code/); `gleam test` fails if a
   skill references a command this reference no longer has.
+
+#### Project scope
+
+`facet init <slug> [--name <name>]` looks the project up by slug, creates it with `POST /api/v1/projects`
+when it does not exist (a `409` on a lost race re-reads it), and persists the slug in the client config
+file. Every later scoped request sends it as `X-Crystalline-Project`, which accepts a project **id or
+slug**; the engine falls back to its `default` project when the header is absent, and answers `404`
+(`Unknown project: <key>`) when it names no project — the CLI turns that into
+`run `facet init <slug>` to create it, or pass --project <id|slug>`.
+
+Scope precedence, most specific first:
+
+| Priority | Source |
+| --- | --- |
+| 1 | `--project <id\|slug>` global flag |
+| 2 | `FACET_PROJECT` environment variable |
+| 3 | config file written by `facet init` |
+| 4 | absent — the engine's `default` project |
+
+The config file is JSON (`{"project": "<id-or-slug>"}`) at `$FACET_CONFIG`, else
+`$XDG_CONFIG_HOME/facet/config.json`, else `$HOME/.config/facet/config.json`. A missing or malformed
+file means "no persisted project", never an error.
+
+#### Code references
+
+A code reference is **not** a separate entity: the engine stores it as the `code_ref` field of a section
+(`path`, `line_start`, `line_end`, `name`, `description`). The CLI mirrors that:
+
+- `facet task ref <task-id> <path> [flags]` is `POST /api/v1/tasks/:task_id/sections` with
+  `code_ref:{…}`. `--type` (default `context`) picks the section type and `--content` (default the code
+  path) the section text, so the reference always lives in a real section.
+- `facet task unref <task-id> <section-id>` is `PATCH /api/v1/sections/:id` with `{"code_ref": null}`.
+- `facet task sections <task-id>` shows the reference inline (`code ref: src/main.gleam:10-20 (main)`).
+
+Artifacts are arbitrary JSON documents stored under a task-scoped logical name:
+`GET /api/v1/tasks/:task_id/artifacts` (list, project-scoped), and
+`GET|PUT|DELETE /api/v1/tasks/:task_id/artifacts/:logical_name` (by explicit id and name, so they stay
+reachable without a scope). `put` sends `{"content": <any JSON>}` and the content round-trips exactly;
+`--content -` reads the JSON from stdin.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FACET_URL` | `http://localhost:4920` | Crystalline base URL for the CLI |
+| `FACET_TOKEN` | — | Bearer token for a remote instance |
+| `FACET_PROJECT` | — | Default project scope (id or slug); overrides the config file |
+| `FACET_CONFIG` | `$XDG_CONFIG_HOME/facet/config.json` or `$HOME/.config/facet/config.json` | Override the config file path |
 
 ### Desktop (Tauri)
 

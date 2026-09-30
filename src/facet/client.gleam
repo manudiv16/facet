@@ -35,6 +35,37 @@ pub fn health(config: Config) -> Result(models.HealthStatus, ClientError) {
   expect_json(config, req, models.decode_health_status())
 }
 
+// ─── Projects ───────────────────────────────────────────────────────────────
+
+/// `POST /api/v1/projects` — 201 on create, 409 when the slug is taken.
+pub fn create_project(
+  config: Config,
+  slug: String,
+  name: String,
+) -> Result(models.Project, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/projects",
+  ))
+  req
+  |> json_body(models.encode_project_create(models.ProjectCreate(slug:, name:)))
+  |> expect_json(config, _, models.decode_project())
+}
+
+/// `GET /api/v1/projects/:id` — by project id or slug.
+pub fn get_project(
+  config: Config,
+  id_or_slug: String,
+) -> Result(models.Project, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/projects/" <> path_segment(id_or_slug),
+  ))
+  expect_json(config, req, models.decode_project())
+}
+
 // ─── Tasks ──────────────────────────────────────────────────────────────────
 
 /// `GET /api/v1/tasks` (or `/api/v1/tasks/ready` when `filters.ready`).
@@ -118,6 +149,19 @@ pub fn delete_task(
 
 // ─── Task dependencies ─────────────────────────────────────────────────────
 
+/// `GET /api/v1/tasks/:id/path` — the ordered ancestor chain root→task.
+pub fn get_task_path(
+  config: Config,
+  id: String,
+) -> Result(List(models.Task), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/path",
+  ))
+  expect_json(config, req, models.decode_task_path())
+}
+
 /// `POST /api/v1/tasks/:id/dependencies` — makes `task_id` depend on
 /// `depends_on`, so `task_id` is blocked while `depends_on` is open.
 pub fn add_dependency(
@@ -198,6 +242,22 @@ pub fn create_section(
   ))
   req
   |> json_body(models.encode_section_create(body))
+  |> expect_json(config, _, models.decode_section())
+}
+
+/// `PATCH /api/v1/sections/:id` — currently only used to clear a section's
+/// code reference (`{"code_ref": null}`).
+pub fn clear_section_code_ref(
+  config: Config,
+  id: String,
+) -> Result(models.Section, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Patch,
+    api_prefix <> "/sections/" <> path_segment(id),
+  ))
+  req
+  |> json_body(models.encode_code_ref_clear())
   |> expect_json(config, _, models.decode_section())
 }
 
@@ -337,6 +397,21 @@ pub fn reject_flow(
   |> expect_json(config, _, models.decode_execution_state())
 }
 
+/// `POST /api/v1/flows/:instance_id/cancel` — 200 with the cancelled
+/// execution; 409 when the execution is pending or already terminal, with the
+/// status named in the error body.
+pub fn cancel_flow(
+  config: Config,
+  instance_id: String,
+) -> Result(models.ExecutionState, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/flows/" <> path_segment(instance_id) <> "/cancel",
+  ))
+  expect_json(config, req, models.decode_execution_state())
+}
+
 // ─── Executions ─────────────────────────────────────────────────────────────
 
 /// `GET /api/v1/tasks/:task_id/executions` — step execution history.
@@ -417,9 +492,83 @@ pub fn append_log(
   |> expect_json(config, _, models.decode_session_log())
 }
 
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+
+/// `GET /api/v1/tasks/:task_id/artifacts` — the task's artifacts by logical
+/// name. Project-scoped by the engine (the task must belong to the configured
+/// project).
+pub fn list_artifacts(
+  config: Config,
+  task_id: String,
+) -> Result(List(models.Artifact), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(task_id) <> "/artifacts",
+  ))
+  expect_json(config, req, decode.list(models.decode_artifact()))
+}
+
+/// `GET /api/v1/tasks/:task_id/artifacts/:logical_name`
+pub fn get_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+) -> Result(models.Artifact, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    artifact_path(task_id, logical_name),
+  ))
+  expect_json(config, req, models.decode_artifact())
+}
+
+/// `PUT /api/v1/tasks/:task_id/artifacts/:logical_name` — insert or replace;
+/// the engine answers 200 either way.
+pub fn put_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+  content: json.Json,
+) -> Result(models.Artifact, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Put,
+    artifact_path(task_id, logical_name),
+  ))
+  req
+  |> json_body(models.encode_artifact_put(models.ArtifactPut(content:)))
+  |> expect_json(config, _, models.decode_artifact())
+}
+
+/// `DELETE /api/v1/tasks/:task_id/artifacts/:logical_name`
+pub fn delete_artifact(
+  config: Config,
+  task_id: String,
+  logical_name: String,
+) -> Result(models.Message, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Delete,
+    artifact_path(task_id, logical_name),
+  ))
+  expect_json(config, req, models.decode_message())
+}
+
+fn artifact_path(task_id: String, logical_name: String) -> String {
+  api_prefix
+  <> "/tasks/"
+  <> path_segment(task_id)
+  <> "/artifacts/"
+  <> path_segment(logical_name)
+}
+
 // ─── Request building ───────────────────────────────────────────────────────
 
-/// Build an authenticated request against `config.base_url`.
+/// Build an authenticated request against `config.base_url`. When the config
+/// carries a project scope it is sent as `X-Crystalline-Project` (id or slug),
+/// which the engine resolves per request; without one the engine uses its
+/// `default` project.
 pub fn base_request(
   config: Config,
   method: http.Method,
@@ -433,8 +582,19 @@ pub fn base_request(
         req
         |> request.set_method(method)
         |> request.set_header("accept", "application/json")
+        |> add_project(config)
         |> add_auth(config),
       )
+  }
+}
+
+fn add_project(
+  req: request.Request(String),
+  config: Config,
+) -> request.Request(String) {
+  case config.project {
+    Some(project) -> request.set_header(req, config.project_header, project)
+    None -> req
   }
 }
 

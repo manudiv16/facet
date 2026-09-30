@@ -7,11 +7,14 @@ import facet/cli/app
 import facet/cli/commands
 import facet/cli/types
 import facet/config
+import facet/ffi
 import facet/models
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
+import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 
 @external(erlang, "facet_stub_server", "start_capture")
 fn stub_start_capture(
@@ -19,8 +22,19 @@ fn stub_start_capture(
   body: String,
 ) -> #(dynamic.Dynamic, Int, dynamic.Dynamic)
 
+@external(erlang, "facet_stub_server", "start_capture_script")
+fn stub_start_script(
+  responses: List(#(Int, String)),
+) -> #(dynamic.Dynamic, Int, dynamic.Dynamic)
+
 @external(erlang, "facet_stub_server", "get_captured")
 fn stub_get_captured(collector: dynamic.Dynamic) -> dynamic.Dynamic
+
+@external(erlang, "facet_stub_server", "get_captured_all")
+fn stub_get_all(collector: dynamic.Dynamic) -> dynamic.Dynamic
+
+@external(erlang, "facet_stub_server", "get_captured_headers")
+fn stub_get_headers(collector: dynamic.Dynamic) -> dynamic.Dynamic
 
 // ─── Wire-format fixtures ───────────────────────────────────────────────────
 
@@ -40,7 +54,13 @@ const run_step_action_json = "{\"kind\":\"run_step\",\"node\":{\"id\":\"n1\",\"n
 
 const log_json = "{\"id\":\"log-1\",\"event_type\":\"text\",\"payload\":\"{}\",\"sequence\":1}"
 
-const section_json = "{\"id\":\"sec-1\",\"task_id\":\"task-1\",\"section_type\":\"goal\",\"content\":\"Ship the release\",\"order\":1}"
+const section_json = "{\"id\":\"sec-1\",\"task_id\":\"task-1\",\"section_type\":\"goal\",\"content\":\"Ship the release\",\"code_ref\":null,\"order\":1}"
+
+const project_json = "{\"id\":\"proj-1\",\"slug\":\"acme\",\"name\":\"Acme\",\"description\":\"\",\"created_at\":1,\"updated_at\":2}"
+
+const artifact_json = "{\"id\":\"art-1\",\"task_id\":\"task-1\",\"logical_name\":\"plan.json\",\"content\":{\"ok\":true},\"created_at\":1,\"updated_at\":2}"
+
+const cancelled_state_json = "{\"id\":\"state-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"cancelled\",\"completed_at\":99}"
 
 // ─── health ─────────────────────────────────────────────────────────────────
 
@@ -473,7 +493,8 @@ pub fn http_error_becomes_readable_request_error_test() {
 }
 
 pub fn network_failure_becomes_request_error_test() {
-  let config = config.Config(base_url: "http://127.0.0.1:1", token: None)
+  let config =
+    config.Config(base_url: "http://127.0.0.1:1", token: None, project: None)
   let assert Error(types.RequestError(config.NetworkError(_))) =
     commands_run(config, types.Health)
 }
@@ -511,6 +532,341 @@ pub fn app_main_exit_codes_test() {
   assert app.main(["help"]) == 0
 }
 
+// ─── init / project scope ───────────────────────────────────────────────────
+
+pub fn init_creates_project_and_persists_scope_test() {
+  let config_path = tmp_config_path("init-new")
+  set_env("FACET_CONFIG", config_path)
+  let #(_listener, port, collector) =
+    stub_start_script([
+      #(404, "{\"error\":\"Project not found\"}"),
+      #(201, project_json),
+    ])
+  let assert Ok(types.ProjectInitialized(project, path)) =
+    commands_run(
+      loopback(port),
+      types.Init(types.InitArgs(slug: "acme", name: Some("Acme"))),
+    )
+  assert project.id == "proj-1"
+  assert project.slug == "acme"
+  assert path == config_path
+  assert captured_all(collector)
+    == [
+      ["GET", "/api/v1/projects/acme", ""],
+      ["POST", "/api/v1/projects", "{\"slug\":\"acme\",\"name\":\"Acme\"}"],
+    ]
+  // The scope is persisted to the config file: reading it back (still
+  // pointed at that file) resolves the project without any env override.
+  assert config.read_config_file().project == Some("acme")
+  unset_env("FACET_CONFIG")
+}
+
+pub fn init_reuses_an_existing_project_without_creating_test() {
+  let config_path = tmp_config_path("init-existing")
+  set_env("FACET_CONFIG", config_path)
+  let #(_listener, port, collector) = stub_start_capture(200, project_json)
+  let assert Ok(types.ProjectInitialized(project, _)) =
+    commands_run(
+      loopback(port),
+      types.Init(types.InitArgs(slug: "acme", name: None)),
+    )
+  assert project.slug == "acme"
+  assert captured_all(collector) == [["GET", "/api/v1/projects/acme", ""]]
+  unset_env("FACET_CONFIG")
+}
+
+pub fn init_defaults_the_name_to_the_slug_test() {
+  let config_path = tmp_config_path("init-name")
+  set_env("FACET_CONFIG", config_path)
+  let #(_listener, port, collector) =
+    stub_start_script([
+      #(404, "{\"error\":\"Project not found\"}"),
+      #(201, project_json),
+    ])
+  let assert Ok(_) =
+    commands_run(
+      loopback(port),
+      types.Init(types.InitArgs(slug: "acme", name: None)),
+    )
+  assert captured_all(collector)
+    == [
+      ["GET", "/api/v1/projects/acme", ""],
+      ["POST", "/api/v1/projects", "{\"slug\":\"acme\",\"name\":\"acme\"}"],
+    ]
+  unset_env("FACET_CONFIG")
+}
+
+pub fn init_recovers_when_the_create_loses_a_race_test() {
+  let config_path = tmp_config_path("init-race")
+  set_env("FACET_CONFIG", config_path)
+  let #(_listener, port, collector) =
+    stub_start_script([
+      #(404, "{\"error\":\"Project not found\"}"),
+      #(409, "{\"error\":\"Project slug already exists: acme\"}"),
+      #(200, project_json),
+    ])
+  let assert Ok(types.ProjectInitialized(project, _)) =
+    commands_run(
+      loopback(port),
+      types.Init(types.InitArgs(slug: "acme", name: None)),
+    )
+  assert project.slug == "acme"
+  assert list.length(captured_all(collector)) == 3
+  unset_env("FACET_CONFIG")
+}
+
+pub fn scoped_commands_send_the_project_header_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, task_path_json())
+  let assert Ok(types.TaskPathShown(task_id, path)) =
+    commands_run(scoped(port, "acme"), types.Path("task-3"))
+  assert task_id == "task-3"
+  assert list.length(path) == 3
+  assert captured(collector) == ["GET", "/api/v1/tasks/task-3/path", ""]
+  assert list.contains(
+    captured_headers(collector),
+    "x-crystalline-project: acme",
+  )
+}
+
+pub fn unscoped_commands_omit_the_project_header_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, task_path_json())
+  let assert Ok(_) = commands_run(loopback(port), types.Path("task-3"))
+  assert list.contains(
+      captured_headers(collector),
+      "x-crystalline-project: acme",
+    )
+    == False
+}
+
+pub fn unknown_project_404_message_points_at_init_test() {
+  let client_config = scoped(1, "ghost")
+  assert app.error_message(
+      client_config,
+      types.RequestError(config.HttpError(
+        404,
+        "{\"error\":\"Unknown project: ghost\"}",
+      )),
+    )
+    == "unknown project: run `facet init <slug>` to create it, or pass --project <id|slug>"
+
+  // An unrelated 404 keeps the engine's message verbatim.
+  assert app.error_message(
+      client_config,
+      types.RequestError(config.HttpError(404, "{\"error\":\"Task not found\"}")),
+    )
+    == "HTTP 404: {\"error\":\"Task not found\"}"
+}
+
+// ─── path / stop ────────────────────────────────────────────────────────────
+
+pub fn path_hits_the_path_endpoint_and_decodes_root_to_task_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, task_path_json())
+  let assert Ok(types.TaskPathShown(task_id, path)) =
+    commands_run(loopback(port), types.Path("task-3"))
+  assert task_id == "task-3"
+  assert list.map(path, fn(task) { task.id }) == ["task-1", "task-2", "task-3"]
+  assert captured(collector) == ["GET", "/api/v1/tasks/task-3/path", ""]
+}
+
+pub fn stop_posts_cancel_and_decodes_the_cancelled_execution_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(200, cancelled_state_json)
+  let assert Ok(types.FlowCancelled(instance_id, state)) =
+    commands_run(loopback(port), types.Stop("flow-1"))
+  assert instance_id == "flow-1"
+  assert state.status == models.ExecCancelled
+  assert state.completed_at == Some(99)
+  assert captured(collector) == ["POST", "/api/v1/flows/flow-1/cancel", ""]
+}
+
+pub fn stop_on_a_non_running_execution_surfaces_the_409_message_test() {
+  let #(_listener, port, _collector) =
+    stub_start_capture(
+      409,
+      "{\"error\":\"Cannot cancel: execution is pending\"}",
+    )
+  let assert Error(types.RequestError(config.HttpError(409, body))) =
+    commands_run(loopback(port), types.Stop("flow-1"))
+  assert string.contains(body, "Cannot cancel: execution is pending")
+}
+
+pub fn stop_after_cancel_surfaces_the_was_cancelled_409_test() {
+  // The engine refuses a later advance with 409 "…was cancelled"; the CLI
+  // must report it verbatim rather than swallowing it.
+  let #(_listener, port, _collector) =
+    stub_start_capture(
+      409,
+      "{\"error\":\"Cannot advance: execution was cancelled\"}",
+    )
+  let assert Error(types.RequestError(config.HttpError(409, body))) =
+    commands_run(loopback(port), types.FlowAdvance("flow-1"))
+  assert string.contains(body, "was cancelled")
+}
+
+// ─── task ref / unref ───────────────────────────────────────────────────────
+
+pub fn task_ref_creates_a_section_with_code_ref_test() {
+  let section_json =
+    "{\"id\":\"sec-9\",\"task_id\":\"task-1\",\"section_type\":\"context\",\"content\":\"src/main.gleam\",\"code_ref\":{\"path\":\"src/main.gleam\",\"line_start\":10,\"line_end\":20,\"name\":\"main\",\"description\":null},\"order\":1}"
+  let #(_listener, port, collector) = stub_start_capture(201, section_json)
+  let assert Ok(types.CodeRefAdded(section)) =
+    commands_run(
+      loopback(port),
+      types.TaskRef(
+        "task-1",
+        types.TaskRefArgs(
+          code_path: "src/main.gleam",
+          line_start: Some(10),
+          line_end: Some(20),
+          name: Some("main"),
+          description: None,
+          section_type: models.Context,
+          content: "src/main.gleam",
+        ),
+      ),
+    )
+  assert section.id == "sec-9"
+  let assert Some(code_ref) = section.code_ref
+  assert code_ref.path == "src/main.gleam"
+  assert code_ref.line_start == Some(10)
+  assert code_ref.line_end == Some(20)
+  assert captured(collector)
+    == [
+      "POST",
+      "/api/v1/tasks/task-1/sections",
+      "{\"code_ref\":{\"path\":\"src/main.gleam\",\"line_start\":10,\"line_end\":20,\"name\":\"main\",\"description\":null},\"section_type\":\"context\",\"content\":\"src/main.gleam\"}",
+    ]
+}
+
+pub fn task_unref_patches_the_section_to_clear_code_ref_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, section_json)
+  let assert Ok(types.CodeRefCleared(section_id, section)) =
+    commands_run(loopback(port), types.TaskUnref("task-1", "sec-1"))
+  assert section_id == "sec-1"
+  assert section.code_ref == None
+  assert captured(collector)
+    == ["PATCH", "/api/v1/sections/sec-1", "{\"code_ref\":null}"]
+}
+
+// ─── artifacts ──────────────────────────────────────────────────────────────
+
+pub fn artifact_list_hits_the_task_artifacts_endpoint_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(200, "[" <> artifact_json <> "]")
+  let assert Ok(types.ArtifactsListed(task_id, artifacts)) =
+    commands_run(scoped(port, "acme"), types.ArtifactList("task-1"))
+  assert task_id == "task-1"
+  let assert [artifact] = artifacts
+  assert artifact.logical_name == "plan.json"
+  assert captured(collector) == ["GET", "/api/v1/tasks/task-1/artifacts", ""]
+  assert list.contains(
+    captured_headers(collector),
+    "x-crystalline-project: acme",
+  )
+}
+
+pub fn artifact_get_encodes_the_logical_name_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, artifact_json)
+  let assert Ok(types.ArtifactShown(artifact)) =
+    commands_run(loopback(port), types.ArtifactGet("task-1", "release notes"))
+  assert artifact.logical_name == "plan.json"
+  assert captured(collector)
+    == [
+      "GET",
+      "/api/v1/tasks/task-1/artifacts/release%20notes",
+      "",
+    ]
+}
+
+pub fn artifact_put_posts_the_parsed_json_content_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, artifact_json)
+  let assert Ok(types.ArtifactStored(_)) =
+    commands_run(
+      loopback(port),
+      types.ArtifactPut("task-1", "plan.json", types.InlineContent("[1,2,3]")),
+    )
+  assert captured(collector)
+    == [
+      "PUT",
+      "/api/v1/tasks/task-1/artifacts/plan.json",
+      "{\"content\":[1,2,3]}",
+    ]
+}
+
+pub fn artifact_put_round_trips_nested_object_content_test() {
+  // The engine echoes the stored content; whatever we sent must come back
+  // structurally intact.
+  let content =
+    "{\"id\":\"art-2\",\"task_id\":\"task-1\",\"logical_name\":\"x\",\"content\":{\"nested\":{\"n\":[1,2],\"ok\":true}},\"created_at\":1,\"updated_at\":2}"
+  let #(_listener, port, collector) = stub_start_capture(200, content)
+  let assert Ok(types.ArtifactStored(artifact)) =
+    commands_run(
+      loopback(port),
+      types.ArtifactPut(
+        "task-1",
+        "x",
+        types.InlineContent("{\"nested\":{\"n\":[1,2],\"ok\":true}}"),
+      ),
+    )
+  let rendered = models.encode_json(artifact.content)
+  assert string.contains(rendered, "\"nested\"")
+  assert string.contains(rendered, "\"n\":[1,2]")
+  assert string.contains(rendered, "\"ok\":true")
+  // The wire body carries the same nested JSON.
+  let body = case captured(collector) {
+    [_, _, body] -> body
+    _ -> ""
+  }
+  assert string.contains(body, "\"nested\"")
+  assert string.contains(body, "\"n\":[1,2]")
+}
+
+pub fn artifact_put_rejects_invalid_json_test() {
+  let #(_listener, port, _collector) = stub_start_capture(200, artifact_json)
+  let assert Error(types.UsageError(message)) =
+    commands_run(
+      loopback(port),
+      types.ArtifactPut("task-1", "x", types.InlineContent("not json")),
+    )
+  assert message == "artifact put --content is not valid JSON"
+}
+
+pub fn artifact_delete_hits_the_named_endpoint_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(200, "{\"message\":\"Artifact deleted\"}")
+  let assert Ok(types.ArtifactDeleted(task_id, logical_name)) =
+    commands_run(loopback(port), types.ArtifactDelete("task-1", "plan.json"))
+  assert task_id == "task-1"
+  assert logical_name == "plan.json"
+  assert captured(collector)
+    == ["DELETE", "/api/v1/tasks/task-1/artifacts/plan.json", ""]
+}
+
+pub fn artifact_put_dash_reads_stdin_test() {
+  let #(_listener, port, collector) = stub_start_capture(200, artifact_json)
+  let url = "http://127.0.0.1:" <> int.to_string(port)
+  assert app.main_with(
+      [
+        "--url",
+        url,
+        "artifact",
+        "task-1",
+        "put",
+        "plan.json",
+        "--content",
+        "-",
+      ],
+      fn() { "{\"from\":\"stdin\"}" },
+    )
+    == 0
+  assert captured(collector)
+    == [
+      "PUT",
+      "/api/v1/tasks/task-1/artifacts/plan.json",
+      "{\"content\":{\"from\":\"stdin\"}}",
+    ]
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 fn commands_run(
@@ -524,11 +880,78 @@ fn loopback(port: Int) -> config.Config {
   config.Config(
     base_url: "http://127.0.0.1:" <> int.to_string(port),
     token: None,
+    project: None,
   )
+}
+
+/// Loopback config scoped to a project, which makes the client send
+/// `X-Crystalline-Project`.
+fn scoped(port: Int, project: String) -> config.Config {
+  config.Config(
+    base_url: "http://127.0.0.1:" <> int.to_string(port),
+    token: None,
+    project: Some(project),
+  )
+}
+
+/// A unique config path so parallel or repeated runs never share state.
+fn tmp_config_path(label: String) -> String {
+  "/tmp/facet-test-"
+  <> label
+  <> "-"
+  <> int.to_string(int.random(1_000_000_000))
+  <> ".json"
+}
+
+fn set_env(name: String, value: String) -> Nil {
+  let _ = ffi.putenv(name, value)
+  Nil
+}
+
+fn unset_env(name: String) -> Nil {
+  let _ = ffi.unsetenv(name)
+  Nil
+}
+
+/// A three-element path: task-3 nested two levels below task-1.
+fn task_path_json() -> String {
+  "{\"path\":["
+  <> task_at("task-1", "Root")
+  <> ","
+  <> task_at("task-2", "Middle")
+  <> ","
+  <> task_at("task-3", "Leaf")
+  <> "]}"
+}
+
+fn task_at(id: String, title: String) -> String {
+  "{\"id\":\""
+  <> id
+  <> "\",\"short_id\":\"s\",\"title\":\""
+  <> title
+  <> "\",\"description\":\"\",\"level\":\"ticket\",\"priority\":\"medium\",\"status\":\"todo\",\"tags\":[],\"parent_id\":null,\"archived\":false,\"created_at\":1,\"updated_at\":2}"
 }
 
 fn captured(collector: dynamic.Dynamic) -> List(String) {
   case decode.run(stub_get_captured(collector), decode.list(decode.string)) {
+    Ok(values) -> values
+    Error(_) -> []
+  }
+}
+
+/// Every request a scripted stub served, in order, as [Method, Target, Body].
+fn captured_all(collector: dynamic.Dynamic) -> List(List(String)) {
+  case
+    decode.run(stub_get_all(collector), decode.list(decode.list(decode.string)))
+  {
+    Ok(values) -> values
+    Error(_) -> []
+  }
+}
+
+/// Headers of the last captured request, lowercased as "name: value".
+fn captured_headers(collector: dynamic.Dynamic) -> List(String) {
+  case decode.run(stub_get_headers(collector), decode.list(decode.string)) {
     Ok(values) -> values
     Error(_) -> []
   }
