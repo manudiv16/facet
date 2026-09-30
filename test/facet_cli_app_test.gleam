@@ -40,6 +40,8 @@ const run_step_action_json = "{\"kind\":\"run_step\",\"node\":{\"id\":\"n1\",\"n
 
 const log_json = "{\"id\":\"log-1\",\"event_type\":\"text\",\"payload\":\"{}\",\"sequence\":1}"
 
+const section_json = "{\"id\":\"sec-1\",\"task_id\":\"task-1\",\"section_type\":\"goal\",\"content\":\"Ship the release\",\"order\":1}"
+
 // ─── health ─────────────────────────────────────────────────────────────────
 
 pub fn health_hits_health_endpoint_test() {
@@ -206,6 +208,58 @@ pub fn task_blockers_hits_blockers_endpoint_test() {
   assert task_id == "task-3"
   assert blockers == [decoded_blocked_task()]
   assert captured(collector) == ["GET", "/api/v1/tasks/task-3/blockers", ""]
+}
+
+// ─── task sections ──────────────────────────────────────────────────────────
+
+pub fn task_sections_hits_sections_endpoint_test() {
+  let #(_listener, port, collector) =
+    stub_start_capture(200, "[" <> section_json <> "]")
+  let config = loopback(port)
+  let assert Ok(types.SectionsShown(task_id, sections)) =
+    commands_run(config, types.TaskSections("task-1"))
+  assert task_id == "task-1"
+  let assert [section] = sections
+  assert section.id == "sec-1"
+  assert section.section_type == models.Goal
+  assert section.content == "Ship the release"
+  assert captured(collector) == ["GET", "/api/v1/tasks/task-1/sections", ""]
+}
+
+pub fn task_section_add_posts_section_body_test() {
+  let #(_listener, port, collector) = stub_start_capture(201, section_json)
+  let config = loopback(port)
+  let assert Ok(types.SectionCreated(section)) =
+    commands_run(
+      config,
+      types.TaskSectionAdd(
+        "task-1",
+        types.TaskSectionAddArgs(
+          section_type: models.Goal,
+          content: "Ship the release",
+        ),
+      ),
+    )
+  assert section.id == "sec-1"
+  assert section.task_id == "task-1"
+  assert captured(collector)
+    == [
+      "POST",
+      "/api/v1/tasks/task-1/sections",
+      "{\"section_type\":\"goal\",\"content\":\"Ship the release\"}",
+    ]
+}
+
+pub fn task_sections_engine_without_api_is_readable_error_test() {
+  // Crystalline builds predating crystalline#16 answer 404 on the sections
+  // route; the CLI must report it as a request error, not crash or lie.
+  let #(_listener, port, _collector) =
+    stub_start_capture(404, "{\"error\":\"not_found\"}")
+  let config = loopback(port)
+  let assert Error(types.RequestError(config.HttpError(
+    404,
+    "{\"error\":\"not_found\"}",
+  ))) = commands_run(config, types.TaskSections("task-1"))
 }
 
 // ─── flow ───────────────────────────────────────────────────────────────────

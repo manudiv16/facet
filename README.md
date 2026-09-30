@@ -54,6 +54,8 @@ facet task add <title> [--level epic|ticket|task] [--priority low|medium|high|cr
 facet task list [--ready] [--status <s>] [--limit <n>] [--offset <n>]
 facet task show <id> | update <id> [--flags] | delete <id> [--cascade]
 facet task depend <id> <depends-on> | undepend <id> <depends-on> | blockers <id>
+facet task sections <id>                  # GET /tasks/:id/sections (crystalline#16)
+facet task section add <id> --type <t> --content "<text>"
 facet flow templates         # or: flow templates show <id>
 facet flow start <task-id> <template-id>
 facet flow status <instance-id>
@@ -69,6 +71,9 @@ facet exec logs <exec-id> [--limit N] [--before SEQ]
 - Flow commands implement the human-in-the-loop loop: `advance` prints the action and the next command to run.
 - `exec logs` pages newest-first; when a page fills up it suggests `--before <oldest sequence>` to continue.
 - Errors go to stderr as `facet: <message>` with exit status 1; success (and `--help`) exit 0.
+- The same commands are exposed to Claude Code as skills under
+  [`integrations/claude-code/`](integrations/claude-code/); `gleam test` fails if a
+  skill references a command this reference no longer has.
 
 ### Desktop (Tauri)
 

@@ -35,6 +35,8 @@ pub type Command {
   TaskDepend(task_id: String, depends_on: String)
   TaskUndepend(task_id: String, depends_on: String)
   TaskBlockers(id: String)
+  TaskSections(id: String)
+  TaskSectionAdd(id: String, args: TaskSectionAddArgs)
   FlowTemplates
   FlowTemplateShow(id: String)
   FlowStart(task_id: String, template_id: String)
@@ -86,6 +88,11 @@ pub type ExecLogsArgs {
   ExecLogsArgs(limit: Option(Int), before: Option(Int))
 }
 
+/// Flags of `task section add`: both are required by the parser.
+pub type TaskSectionAddArgs {
+  TaskSectionAddArgs(section_type: models.SectionType, content: String)
+}
+
 // ─── Structured outputs ────────────────────────────────────────────────────
 
 /// The structured result of running a command. Rendering turns this into
@@ -100,6 +107,8 @@ pub type Output {
   DependencyAdded(task_id: String, depends_on: String)
   DependencyRemoved(task_id: String, depends_on: String)
   BlockersShown(task_id: String, blockers: List(models.Task))
+  SectionsShown(task_id: String, sections: List(models.Section))
+  SectionCreated(section: models.Section)
   TemplatesListed(templates: List(models.FlowTemplate))
   TemplateShown(template: models.FlowTemplate)
   FlowStarted(instance: models.FlowInstance, task_id: String)
