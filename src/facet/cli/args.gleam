@@ -110,7 +110,7 @@ fn parse_command(
 }
 
 fn task_subcommand_help() -> String {
-  "task: missing subcommand (add, list, show, update, delete, depend, undepend, blockers)"
+  "task: missing subcommand (add, list, show, update, delete, depend, undepend, blockers, sections, section)"
 }
 
 fn flow_subcommand_help() -> String {
@@ -356,6 +356,8 @@ fn parse_task(
     "depend" -> parse_task_depend(args)
     "undepend" -> parse_task_undepend(args)
     "blockers" -> parse_task_blockers(args)
+    "sections" -> parse_task_sections(args)
+    "section" -> parse_task_section(args)
     _ -> Error("unknown task subcommand: " <> sub)
   }
 }
@@ -491,6 +493,64 @@ fn parse_task_blockers(args: List(String)) -> Result(types.Command, String) {
     [id] -> Ok(types.TaskBlockers(id))
     [] -> Error("task blockers expects a task id")
     _ -> Error("task blockers takes exactly one id argument")
+  }
+}
+
+fn parse_task_sections(args: List(String)) -> Result(types.Command, String) {
+  use tokens <- result.try(tokenize(args, [], []))
+  case tokens.positionals {
+    [id] -> Ok(types.TaskSections(id))
+    [] -> Error("task sections expects a task id")
+    _ -> Error("task sections takes exactly one id argument")
+  }
+}
+
+fn parse_task_section(args: List(String)) -> Result(types.Command, String) {
+  case args {
+    ["add", ..rest] -> parse_task_section_add(rest)
+    [] -> Error("task section: missing subcommand (add)")
+    [sub, ..] -> Error("unknown task section subcommand: " <> sub)
+  }
+}
+
+fn parse_task_section_add(args: List(String)) -> Result(types.Command, String) {
+  let value_flags = ["type", "content"]
+  use tokens <- result.try(tokenize(args, value_flags, []))
+  case tokens.positionals {
+    [id] -> {
+      use section_type <- result.try(parse_section_type(tokens))
+      use content <- result.try(parse_section_content(tokens))
+      Ok(types.TaskSectionAdd(
+        id,
+        types.TaskSectionAddArgs(section_type:, content:),
+      ))
+    }
+    [] -> Error("task section add expects a task id")
+    _ -> Error("task section add takes exactly one id argument")
+  }
+}
+
+fn parse_section_type(tokens: Tokens) -> Result(models.SectionType, String) {
+  case value_of(tokens, "type") {
+    None -> Error("task section add requires --type <section-type>")
+    Some(raw) ->
+      case models.section_type_from_string(raw) {
+        Ok(section_type) -> Ok(section_type)
+        Error(_) ->
+          Error(
+            "invalid section type: "
+            <> raw
+            <> " (expected goal, context, current_behavior, desired_behavior, checklist_item, testing_criterion, constraint, anti_pattern or failure_test)",
+          )
+      }
+  }
+}
+
+fn parse_section_content(tokens: Tokens) -> Result(String, String) {
+  case value_of(tokens, "content") {
+    None -> Error("task section add requires --content <text>")
+    Some("") -> Error("task section add requires --content <text>")
+    Some(content) -> Ok(content)
   }
 }
 

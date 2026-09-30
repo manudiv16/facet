@@ -14,7 +14,7 @@
   export let taskId: string;
 
   const store = useExecutionHistory(taskId);
-  const { executions, aggregate, loading, loadingOlder, hasMore, polling, error } =
+  const { executions, aggregate, loading, loadingOlder, hasMore, live, flow, gap, error } =
     store;
 
   let selectedId: string | null = null;
@@ -63,13 +63,27 @@
       <h2>Execution history</h2>
       <p class="muted">
         Task <code>{taskId}</code> — one row per step, newest first.
+        {#if $flow}
+          Flow <span class="badge badge-{statusClass($flow.status)}">
+            {$flow.status.replace("_", " ")}
+          </span>
+          {#if $flow.current_node_id}
+            at <code>{$flow.current_node_id}</code>
+          {/if}
+        {/if}
       </p>
     </div>
     <div class="history-meta">
-      {#if $polling}
-        <span class="live-dot" title="Refreshing every 3s"></span>
+      {#if $live}
+        <span class="live-dot" title="Streaming engine events"></span>
         <span class="live-label">live</span>
       {/if}
+      {#if $gap}
+        <span class="gap-note" role="status">resynced after a stream gap</span>
+      {/if}
+      <button type="button" class="refresh" on:click={() => store.refresh()} disabled={$loading}>
+        Refresh
+      </button>
       {#if $error}
         <span class="error-inline">{$error}</span>
       {/if}
@@ -154,7 +168,11 @@
   {#if selected}
     <div class="log-pane">
       {#key selected.id}
-        <SessionLog executionId={selected.id} status={selected.status} />
+        <SessionLog
+          executionId={selected.id}
+          status={selected.status}
+          onStepStatus={(frame) => store.applyStepStatus(frame)}
+        />
       {/key}
     </div>
   {/if}
@@ -203,6 +221,30 @@
 
   .error-inline {
     color: #ef4444;
+  }
+
+  .gap-note {
+    color: var(--warning, #f59e0b);
+  }
+
+  .refresh {
+    padding: 0.2rem 0.6rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  .refresh:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+
+  .refresh:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .state {

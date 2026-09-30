@@ -311,13 +311,29 @@ function normalizeSteps(raw: unknown): FlowStepExecution[] {
  * Normalise an execution-state response.
  *
  * Handles:
+ *   { instance: {...}, execution: {...} }          (Crystalline C18 envelope)
  *   { id, status, current_node_id, flow_instance: {...}, step_history: [...] }
  *   { state: {...}, instance: {...} }
  *   { flow_instance: {...} }                       (instance only)
+ *   { id, status, … }                              (execution only)
+ *
+ * Identity and graph come from `instance`, runtime state from `execution`; a
+ * flat payload is read from the top level.
  */
 export function normalizeState(raw: unknown): FlowExecutionState {
 	const outer = asRecord(raw);
 	const stateRecord = asRecord(outer.state ?? raw);
+	const executionRecord = asRecord(stateRecord.execution ?? outer.execution);
+	// Legacy builds put the instance fields directly on the state record; only
+	// treat that record as the instance when it actually carries graph fields,
+	// otherwise an execution-only payload would pass its execution id off as a
+	// flow instance id.
+	const flatInstance =
+		stateRecord.nodes !== undefined ||
+		stateRecord.transitions !== undefined ||
+		stateRecord.template_id !== undefined
+			? stateRecord
+			: {};
 	const instanceSource =
 		stateRecord.flow_instance ??
 		stateRecord.flowInstance ??
@@ -325,38 +341,29 @@ export function normalizeState(raw: unknown): FlowExecutionState {
 		outer.flow_instance ??
 		outer.flowInstance ??
 		outer.instance ??
-		stateRecord;
+		flatInstance;
 	const instance = normalizeInstance(instanceSource);
 
+	// Runtime fields sit under `execution` in the C18 envelope and at the top
+	// level (or under `state`) in every other shape.
+	const runtime = (key: string): unknown =>
+		executionRecord[key] ?? stateRecord[key] ?? outer[key];
+
+	const startedAt = runtime("started_at");
+	const completedAt = runtime("completed_at");
+
 	return {
-		id: asString(stateRecord.id ?? outer.id),
+		id: asString(runtime("id")),
 		flow_instance: instance,
-		task_id: asString(
-			stateRecord.task_id ?? outer.task_id ?? instance.task_id,
-		),
-		status:
-			normalizeExecutionStatus(stateRecord.status ?? outer.status) ?? "pending",
-		current_node_id: asOptionalString(
-			stateRecord.current_node_id ?? outer.current_node_id,
-		),
-		step_history: normalizeSteps(
-			stateRecord.step_history ?? outer.step_history,
-		),
-		loop_counters: asNumberMap(
-			stateRecord.loop_counters ?? outer.loop_counters,
-		),
-		variables: asStringMap(stateRecord.variables ?? outer.variables),
-		parallel_active: asStringArray(
-			stateRecord.parallel_active ?? outer.parallel_active,
-		),
-		started_at:
-			typeof (stateRecord.started_at ?? outer.started_at) === "number"
-				? ((stateRecord.started_at ?? outer.started_at) as number)
-				: null,
-		completed_at:
-			typeof (stateRecord.completed_at ?? outer.completed_at) === "number"
-				? ((stateRecord.completed_at ?? outer.completed_at) as number)
-				: null,
+		task_id: asString(runtime("task_id") ?? instance.task_id),
+		status: normalizeExecutionStatus(runtime("status")) ?? "pending",
+		current_node_id: asOptionalString(runtime("current_node_id")),
+		step_history: normalizeSteps(runtime("step_history")),
+		loop_counters: asNumberMap(runtime("loop_counters")),
+		variables: asStringMap(runtime("variables")),
+		parallel_active: asStringArray(runtime("parallel_active")),
+		started_at: typeof startedAt === "number" ? startedAt : null,
+		completed_at: typeof completedAt === "number" ? completedAt : null,
 	};
 }
 

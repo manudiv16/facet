@@ -283,3 +283,25 @@ pub fn template_list_renders_rows_test() {
   assert string.contains(rendered, "DESCRIPTION")
   assert string.contains(rendered, "one step")
 }
+
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+pub fn empty_sections_renders_no_sections_test() {
+  assert render.render(types.SectionsShown("task-1", []))
+    == "sections of task-1:\nno sections"
+}
+
+pub fn json_sections_render_array_test() {
+  let section =
+    models.Section(
+      id: "sec-1",
+      task_id: "task-1",
+      section_type: models.Goal,
+      content: "Ship the release",
+      order: 1,
+    )
+  let rendered = render.render_json(types.SectionsShown("task-1", [section]))
+  assert string.contains(rendered, "\"id\":\"sec-1\"")
+  assert string.contains(rendered, "\"section_type\":\"goal\"")
+  assert string.contains(rendered, "\"content\":\"Ship the release\"")
+}

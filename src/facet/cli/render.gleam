@@ -33,6 +33,10 @@ pub fn render(output: Output) -> String {
       "dependency removed: " <> task_id <> " -x-> " <> depends_on
     types.BlockersShown(task_id, blockers) ->
       "blockers of " <> task_id <> ":\n" <> render_task_table(blockers)
+    types.SectionsShown(task_id, sections) ->
+      "sections of " <> task_id <> ":\n" <> render_section_table(sections)
+    types.SectionCreated(section) ->
+      "section added:\n" <> render_section(section)
     types.TemplatesListed(templates) -> render_template_table(templates)
     types.TemplateShown(template) -> render_template(template)
     types.FlowStarted(instance, task_id) ->
@@ -178,6 +182,44 @@ fn widen(widths: List(Int), row: List(String)) -> List(Int) {
     [width, ..rest_widths], [] -> [width, ..rest_widths]
     [], [] -> []
   }
+}
+
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+fn render_section_table(sections: List(models.Section)) -> String {
+  case sections {
+    [] -> "no sections"
+    _ -> {
+      let rows =
+        list.map(sections, fn(section) {
+          [
+            section.id,
+            models.section_type_to_string(section.section_type),
+            int.to_string(section.order),
+            section.content,
+          ]
+        })
+      let widths = column_widths(rows, [12, 20, 6, 0])
+      let header = [
+        pad_to("ID", 12),
+        pad_to("TYPE", 20),
+        pad_to("ORDER", 6),
+        "CONTENT",
+      ]
+      let table = [string.join(header, "  "), ..render_table_rows(rows, widths)]
+      string.join(table, "\n")
+    }
+  }
+}
+
+fn render_section(section: models.Section) -> String {
+  render_lines([
+    #("id", section.id),
+    #("task", section.task_id),
+    #("type", models.section_type_to_string(section.section_type)),
+    #("order", int.to_string(section.order)),
+    #("content", section.content),
+  ])
 }
 
 // ─── Flow templates ─────────────────────────────────────────────────────────
@@ -495,6 +537,9 @@ fn json_of(output: Output) -> json.Json {
         #("message", json.string("Dependency removed")),
       ])
     types.BlockersShown(_, blockers) -> json.array(blockers, models.encode_task)
+    types.SectionsShown(_, sections) ->
+      json.array(sections, models.encode_section)
+    types.SectionCreated(section) -> models.encode_section(section)
     types.TemplatesListed(templates) ->
       json.array(templates, models.encode_flow_template)
     types.TemplateShown(template) -> models.encode_flow_template(template)
@@ -574,6 +619,8 @@ commands:
   task depend <id> <depends-on>           <id> blocks until <depends-on> is done
   task undepend <id> <depends-on>         Remove a dependency
   task blockers <id>                      Show tasks blocking <id>
+  task sections <id>                      List a task's structured sections
+  task section add <id> --type <t> --content <text>   Append a section
   flow templates                          List flow templates
   flow templates show <id>                Show one flow template
   flow start <task-id> <template-id>      Start a flow for a task
@@ -590,6 +637,7 @@ commands:
 task add flags:    --description <text>  --level epic|ticket|task  --priority low|medium|high|critical  --tag <t> (repeatable)  --parent <id>
 task list flags:   --level <l>  --status <s>  --parent <id>  --limit <n>  --offset <n>  --ready
 task update flags: --title <t>  --description <d>  --level <l>  --priority <p>  --status <s>  --parent <id>
+section add flags: --type goal|context|current_behavior|desired_behavior|checklist_item|testing_criterion|constraint|anti_pattern|failure_test  --content <text>
 
 exit status:
   0  success (including --help)

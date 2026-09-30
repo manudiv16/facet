@@ -14,11 +14,12 @@ import {
 	advanceFlow,
 	completeStep,
 	getTaskFlow,
-	listTemplates,
 	provideInput,
 	rejectFlow,
 	startFlow,
+	unassignTaskFlow,
 } from "./flows-api";
+import { listTemplates } from "./flow-templates-api";
 import type { NormalizedAdvance } from "./flow-model";
 import { SEEDED_TEMPLATES } from "./seeded-templates";
 import type { EngineAction, FlowExecutionState, FlowNodeStatus, FlowTemplate } from "./types";
@@ -30,7 +31,7 @@ export interface FlowActionLogEntry {
 
 function describeError(error: unknown): string {
 	if (error && typeof error === "object" && "message" in error) {
-		const message = (error as { message?: unknown }).message;
+		const message = error.message;
 		if (typeof message === "string" && message.length > 0) return message;
 	}
 	if (error instanceof Error) return error.message;
@@ -77,6 +78,8 @@ export interface FlowStore {
 	complete: (output: string) => Promise<void>;
 	input: (text: string) => Promise<void>;
 	reject: (reason?: string) => Promise<void>;
+	/** Detach the task from its terminal flow instance (`DELETE /tasks/:id/flow`). */
+	unassign: () => Promise<void>;
 	refresh: () => Promise<FlowExecutionState | null>;
 	reset: () => void;
 }
@@ -174,27 +177,22 @@ export function createFlowStore(): FlowStore {
 	async function advance(): Promise<void> {
 		const current = get(state);
 		if (!current) return;
+		const instanceId = current.flow_instance.id;
 		await run(async () => {
-			apply(await advanceFlow(current.flow_instance.id));
+			apply(await advanceFlow(instanceId));
+			// Advance answers `{execution, action}`: the action is the payload,
+			// the authoritative state (node, status, graph) comes from the task's
+			// flow resource.
+			await refresh();
 		});
 	}
 
 	async function complete(output: string): Promise<void> {
 		const current = get(state);
 		if (!current) return;
-		const stepId = currentStepId(current);
-		if (!stepId) {
-			error.set("No active step to complete");
-			return;
-		}
 		await run(async () => {
-			const payload = await completeStep(
-				current.flow_instance.id,
-				stepId,
-				output,
-			);
-			apply(payload);
-			if (!payload.state) await refresh();
+			apply(await completeStep(current.flow_instance.id, output));
+			await refresh();
 		});
 	}
 
@@ -202,9 +200,8 @@ export function createFlowStore(): FlowStore {
 		const current = get(state);
 		if (!current) return;
 		await run(async () => {
-			const payload = await provideInput(current.flow_instance.id, text);
-			apply(payload);
-			if (!payload.state) await refresh();
+			apply(await provideInput(current.flow_instance.id, text));
+			await refresh();
 		});
 	}
 
@@ -212,9 +209,28 @@ export function createFlowStore(): FlowStore {
 		const current = get(state);
 		if (!current) return;
 		await run(async () => {
-			const next = await rejectFlow(current.flow_instance.id, reason);
-			state.set(next);
+			await rejectFlow(current.flow_instance.id, reason);
 			action.set(null);
+			await refresh();
+		});
+	}
+
+	/**
+	 * Detach the task from its (terminal) flow instance. The engine refuses
+	 * with 409 while the execution is still pending/running/awaiting_input;
+	 * that message lands in `error`.
+	 */
+	async function unassign(): Promise<void> {
+		if (!taskId) {
+			error.set("Select a task before unassigning a flow");
+			return;
+		}
+		const id = taskId;
+		await run(async () => {
+			await unassignTaskFlow(id);
+			state.set(null);
+			action.set(null);
+			actionLog.set([]);
 		});
 	}
 
@@ -248,6 +264,7 @@ export function createFlowStore(): FlowStore {
 		complete,
 		input,
 		reject,
+		unassign,
 		refresh,
 		reset,
 	};

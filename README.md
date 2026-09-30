@@ -54,6 +54,8 @@ facet task add <title> [--level epic|ticket|task] [--priority low|medium|high|cr
 facet task list [--ready] [--status <s>] [--limit <n>] [--offset <n>]
 facet task show <id> | update <id> [--flags] | delete <id> [--cascade]
 facet task depend <id> <depends-on> | undepend <id> <depends-on> | blockers <id>
+facet task sections <id>                  # GET /tasks/:id/sections (crystalline#16)
+facet task section add <id> --type <t> --content "<text>"
 facet flow templates         # or: flow templates show <id>
 facet flow start <task-id> <template-id>
 facet flow status <instance-id>
@@ -69,6 +71,9 @@ facet exec logs <exec-id> [--limit N] [--before SEQ]
 - Flow commands implement the human-in-the-loop loop: `advance` prints the action and the next command to run.
 - `exec logs` pages newest-first; when a page fills up it suggests `--before <oldest sequence>` to continue.
 - Errors go to stderr as `facet: <message>` with exit status 1; success (and `--help`) exit 0.
+- The same commands are exposed to Claude Code as skills under
+  [`integrations/claude-code/`](integrations/claude-code/); `gleam test` fails if a
+  skill references a command this reference no longer has.
 
 ### Desktop (Tauri)
 
@@ -90,6 +95,17 @@ scripts/build.sh --stub  # or with a real binary: scripts/build.sh
 `cargo tauri dev` and the bundled app expect `desktop/src-tauri/sidecar.toml`-compiled
 values (binary name, preferred port, DB path). On macOS the database defaults to
 `~/Library/Application Support/Facet/crystalline.db`.
+
+#### Provider API keys
+
+The Settings screen (`/settings` in the sidebar) is the credential entry point for the
+embedded engine: keys for Anthropic, OpenAI, Google, Groq, Mistral and OpenRouter can be
+added, replaced, or removed there. Keys are stored in the OS keychain (macOS Keychain,
+Windows Credential Manager, or the Linux Secret Service) — never in config files, the app
+bundle, or logs — and the app only ever reads back which providers are configured, never
+key values. When the embedded sidecar spawns, each configured key is forwarded as its
+conventional environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). Remote mode
+(`FACET_URL`) never receives them: a remote instance manages its own credentials.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

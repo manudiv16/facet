@@ -2,7 +2,9 @@
 	import { onDestroy } from "svelte";
 	import { goto } from "$app/navigation";
 	import { page } from "$app/stores";
+	import ArtifactPanel from "$lib/components/ArtifactPanel.svelte";
 	import DependencyEditor from "$lib/components/DependencyEditor.svelte";
+	import SectionPanel from "$lib/components/SectionPanel.svelte";
 	import TaskBadges from "$lib/components/TaskBadges.svelte";
 	import {
 		formatTimestamp,
@@ -11,7 +13,12 @@
 		STATUSES,
 		STATUS_LABELS,
 	} from "$lib/tasks-utils";
-	import type { TaskPriority, TaskStatus } from "$lib/types";
+	import type {
+		SectionCreateInput,
+		SectionUpdateInput,
+		TaskPriority,
+		TaskStatus,
+	} from "$lib/types";
 	import { archiveTaskOptimistic, createTaskDetailStore, tasks } from "$stores/tasks";
 
 	// The `[id]` route guarantees the param at runtime; `!` matches that.
@@ -59,6 +66,49 @@
 			await detail.removeBlocker(event.detail);
 		} catch {
 			// mutationError surfaces the server message inline.
+		}
+	}
+
+	// The panels surface load/mutation failures through their own error
+	// banners (`$detail.sectionsError` / `$detail.artifactsError`), so these
+	// handlers only keep the rejected promise from reaching the console.
+	async function handleCreateSection(input: SectionCreateInput) {
+		try {
+			await detail.createSection(input);
+		} catch {
+			// sectionsError surfaces the server message inline.
+		}
+	}
+
+	async function handleUpdateSection(id: string, patch: SectionUpdateInput) {
+		try {
+			await detail.updateSection(id, patch);
+		} catch {
+			// sectionsError surfaces the server message inline.
+		}
+	}
+
+	async function handleDeleteSection(id: string) {
+		try {
+			await detail.deleteSection(id);
+		} catch {
+			// sectionsError surfaces the server message inline.
+		}
+	}
+
+	async function handleSaveArtifact(logicalName: string, content: unknown) {
+		try {
+			await detail.saveArtifact(logicalName, content);
+		} catch {
+			// artifactsError surfaces the server message inline.
+		}
+	}
+
+	async function handleDeleteArtifact(logicalName: string) {
+		try {
+			await detail.deleteArtifact(logicalName);
+		} catch {
+			// artifactsError surfaces the server message inline.
 		}
 	}
 
@@ -184,24 +234,6 @@
 				{/if}
 			</article>
 
-			<article class="panel sections">
-				<h2>Sections</h2>
-				{#if !$detail.sectionsAvailable}
-					<p class="muted">Sections are not exposed by this Crystalline build.</p>
-				{:else if $detail.sections.length === 0}
-					<p class="muted">No sections.</p>
-				{:else}
-					<ul class="section-list">
-						{#each $detail.sections as section (section.id)}
-							<li>
-								<span class="section-type">{section.section_type}</span>
-								<p>{section.content}</p>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</article>
-
 			<DependencyEditor
 				taskId={task.id}
 				blockers={$detail.blockers}
@@ -213,6 +245,23 @@
 				on:remove={handleRemove}
 			/>
 		</div>
+
+		<SectionPanel
+			sections={$detail.sections}
+			loading={$detail.sectionsLoading}
+			error={$detail.sectionsError}
+			onCreate={handleCreateSection}
+			onUpdate={handleUpdateSection}
+			onDelete={handleDeleteSection}
+		/>
+
+		<ArtifactPanel
+			artifacts={$detail.artifacts}
+			loading={$detail.artifactsLoading}
+			error={$detail.artifactsError}
+			onSave={handleSaveArtifact}
+			onDelete={handleDeleteArtifact}
+		/>
 	</section>
 {/if}
 
@@ -334,10 +383,6 @@
 		line-height: 1.5;
 	}
 
-	.sections {
-		grid-column: 1 / -1;
-	}
-
 	.tags {
 		display: flex;
 		flex-wrap: wrap;
@@ -395,28 +440,6 @@
 	code {
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.85em;
-	}
-
-	.section-list {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.6rem;
-	}
-
-	.section-type {
-		font-size: 0.7rem;
-		font-weight: 700;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: var(--accent);
-	}
-
-	.section-list p {
-		margin: 0.2rem 0 0;
-		white-space: pre-wrap;
 	}
 
 	.muted {

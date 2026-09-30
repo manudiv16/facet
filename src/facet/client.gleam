@@ -168,6 +168,39 @@ pub fn get_blockers(
   expect_json(config, req, decode.list(models.decode_task()))
 }
 
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+/// `GET /api/v1/tasks/:id/sections` — the structured sections of a task.
+/// Crystalline builds without the sections API (crystalline#16) answer 404,
+/// which surfaces as `HttpError(404, ...)`.
+pub fn list_sections(
+  config: Config,
+  id: String,
+) -> Result(List(models.Section), ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Get,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/sections",
+  ))
+  expect_json(config, req, decode.list(models.decode_section()))
+}
+
+/// `POST /api/v1/tasks/:id/sections` — append a section to a task.
+pub fn create_section(
+  config: Config,
+  id: String,
+  body: models.SectionCreate,
+) -> Result(models.Section, ClientError) {
+  use req <- result.try(base_request(
+    config,
+    http.Post,
+    api_prefix <> "/tasks/" <> path_segment(id) <> "/sections",
+  ))
+  req
+  |> json_body(models.encode_section_create(body))
+  |> expect_json(config, _, models.decode_section())
+}
+
 // ─── Flow templates ─────────────────────────────────────────────────────────
 
 /// `GET /api/v1/flow-templates`

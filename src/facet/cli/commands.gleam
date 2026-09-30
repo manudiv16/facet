@@ -39,6 +39,10 @@ pub fn run(config: Config, command: Command) -> Result(Output, types.CliError) {
     types.TaskBlockers(id) ->
       client.get_blockers(config, id)
       |> as_output(fn(blockers) { types.BlockersShown(id, blockers) })
+    types.TaskSections(id) ->
+      client.list_sections(config, id)
+      |> as_output(fn(sections) { types.SectionsShown(id, sections) })
+    types.TaskSectionAdd(id, args) -> add_section(config, id, args)
     types.FlowTemplates ->
       client.list_templates(config)
       |> as_output(types.TemplatesListed)
@@ -128,6 +132,17 @@ fn update_task(
     )
   client.update_task(config, id, patch)
   |> as_output(types.TaskUpdated)
+}
+
+fn add_section(
+  config: Config,
+  id: String,
+  args: types.TaskSectionAddArgs,
+) -> Result(Output, types.CliError) {
+  let body =
+    models.SectionCreate(section_type: args.section_type, content: args.content)
+  client.create_section(config, id, body)
+  |> as_output(types.SectionCreated)
 }
 
 // ─── Execution helpers ──────────────────────────────────────────────────────
