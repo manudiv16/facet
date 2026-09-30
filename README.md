@@ -77,6 +77,12 @@ facet exec logs <exec-id> [--limit N] [--before SEQ]
 
 - `--ready` lists only unblocked tasks (`/tasks/ready`); `--json` switches to machine-readable output.
 - Flow commands implement the human-in-the-loop loop: `advance` prints the action and the next command to run.
+  `--json` echoes the engine's envelopes verbatim — `flow start` answers
+  `{"instance", "execution"}` and `advance`/`complete-step`/`input`/`reject` answer
+  `{"execution", "action"}`, with the action tagged `type`.
+- `flow status` reads `GET /api/v1/flows/:instance-id`, which the engine does not serve yet: it
+  addresses instances per task (`GET /api/v1/tasks/:task-id/flow`), so the command surfaces the
+  engine's `404` rather than a state.
 - `stop` cancels a `running` or `awaiting_input` execution and prints the cancelled execution. Pending
   or already-terminal executions answer `409` naming their status, and a later `flow advance` answers
   `409` with the engine's `…was cancelled` message verbatim.

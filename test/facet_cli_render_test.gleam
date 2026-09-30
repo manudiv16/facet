@@ -86,6 +86,74 @@ pub fn dependency_renders_arrow_test() {
   assert removed == "dependency removed: task-2 -x-> task-1"
 }
 
+/// The engine's execution summary, as it arrives in the step envelopes.
+fn running_summary() -> models.ExecutionSummary {
+  models.ExecutionSummary(
+    id: "exec-1",
+    instance_id: "flow-1",
+    task_id: "task-1",
+    status: models.ExecRunning,
+    current_node_id: Some("node-2"),
+    started_at: Some(5),
+    completed_at: None,
+  )
+}
+
+fn step(action: models.Action) -> models.ExecutionStep {
+  models.ExecutionStep(execution: running_summary(), action: action)
+}
+
+pub fn flow_started_renders_instance_and_status_test() {
+  let node =
+    models.FlowNode(
+      id: "n1",
+      name: "Research",
+      node_type: models.Step,
+      goal: "Research it",
+      prompt: None,
+      child_ids: [],
+      branch_rules: [],
+      loop_config: None,
+      agent_config: None,
+      output_schema: None,
+    )
+  let instance =
+    models.FlowInstance(
+      id: "flow-1",
+      template_id: "linear",
+      task_id: "task-1",
+      nodes: dict.from_list([#("n1", node)]),
+      transitions: [],
+      initial_node_id: "n1",
+      on_done_template_id: None,
+      on_reject_template_id: None,
+    )
+  let started =
+    models.FlowInstantiation(
+      instance: instance,
+      execution: models.ExecutionSummary(
+        id: "exec-1",
+        instance_id: "flow-1",
+        task_id: "task-1",
+        status: models.ExecPending,
+        current_node_id: None,
+        started_at: None,
+        completed_at: None,
+      ),
+    )
+  let rendered = render.render(types.FlowStarted(started))
+  assert string.contains(rendered, "flow-1")
+  assert string.contains(rendered, "pending")
+  assert string.contains(rendered, "linear")
+  assert string.contains(rendered, "n1")
+
+  let json = render.render_json(types.FlowStarted(started))
+  assert string.contains(json, "\"instance\":{\"id\":\"flow-1\"")
+  assert string.contains(json, "\"execution\":{")
+  assert string.contains(json, "\"status\":\"pending\"")
+  assert string.contains(json, "\"instance_id\":\"flow-1\"")
+}
+
 pub fn flow_advance_run_step_shows_action_and_next_test() {
   let node =
     models.FlowNode(
@@ -100,9 +168,10 @@ pub fn flow_advance_run_step_shows_action_and_next_test() {
       agent_config: None,
       output_schema: None,
     )
-  let output = types.FlowAdvanced("flow-1", models.RunStep(node, "Do it now"))
+  let output = types.FlowAdvanced(step(models.RunStep(node, "Do it now")))
   let rendered = render.render(output)
   assert string.contains(rendered, "run_step")
+  assert string.contains(rendered, "flow-1")
   assert string.contains(rendered, "node-2 (Implement)")
   assert string.contains(rendered, "Do it now")
   assert string.contains(rendered, "Implement the feature")
@@ -126,26 +195,62 @@ pub fn flow_advance_await_input_shows_hint_test() {
       agent_config: None,
       output_schema: None,
     )
-  let output = types.FlowAdvanced("flow-1", models.AwaitInput(node))
-  let rendered = render.render(output)
+  let rendered =
+    render.render(types.FlowAdvanced(step(models.AwaitInput(node))))
   assert string.contains(rendered, "await_input")
   assert string.contains(rendered, "facet flow input flow-1 \"<text>\"")
 }
 
 pub fn flow_advance_complete_renders_test() {
-  let rendered =
-    render.render(types.FlowAdvanced("flow-1", models.FlowComplete))
+  let rendered = render.render(types.FlowAdvanced(step(models.FlowComplete)))
   assert string.contains(rendered, "flow_complete")
   assert string.contains(rendered, "facet task show <task-id>")
 }
 
 pub fn flow_advance_error_renders_message_test() {
-  let output =
-    types.FlowAdvanced("flow-1", models.ExecutionError("model blew up"))
-  let rendered = render.render(output)
+  let rendered =
+    render.render(
+      types.FlowAdvanced(step(models.ExecutionError("model blew up"))),
+    )
   assert string.contains(rendered, "execution_error")
+  assert string.contains(rendered, "flow-1")
   assert string.contains(rendered, "model blew up")
   assert string.contains(rendered, "facet flow reject flow-1 --reason")
+}
+
+pub fn step_completed_renders_the_next_action_test() {
+  let output = types.StepCompleted("node-2", step(models.FlowComplete))
+  let rendered = render.render(output)
+  assert string.contains(rendered, "step completed: node-2")
+  assert string.contains(rendered, "flow_complete")
+
+  let json = render.render_json(output)
+  assert string.contains(json, "\"step_id\":\"node-2\"")
+  assert string.contains(json, "\"execution\":{")
+  assert string.contains(json, "\"type\":\"flow_complete\"")
+}
+
+pub fn input_provided_renders_the_next_action_test() {
+  let node =
+    models.FlowNode(
+      id: "node-3",
+      name: "Implement",
+      node_type: models.Step,
+      goal: "Implement the feature",
+      prompt: None,
+      child_ids: [],
+      branch_rules: [],
+      loop_config: None,
+      agent_config: None,
+      output_schema: None,
+    )
+  let output = types.InputProvided(step(models.RunStep(node, "go")))
+  let rendered = render.render(output)
+  assert string.contains(rendered, "input provided for instance flow-1")
+  assert string.contains(rendered, "run_step")
+
+  let json = render.render_json(output)
+  assert string.contains(json, "\"type\":\"run_step\"")
 }
 
 pub fn empty_exec_history_renders_no_executions_test() {
@@ -220,11 +325,11 @@ pub fn json_task_list_renders_array_test() {
   assert string.contains(rendered, "\"title\":\"Wire the client\"")
 }
 
-pub fn json_flow_advance_renders_action_test() {
-  let output = types.FlowAdvanced("flow-1", models.FlowComplete)
+pub fn json_flow_advance_renders_the_engine_envelope_test() {
+  let output = types.FlowAdvanced(step(models.FlowComplete))
   let rendered = render.render_json(output)
-  assert string.contains(rendered, "\"instance_id\":\"flow-1\"")
-  assert string.contains(rendered, "\"kind\":\"flow_complete\"")
+  assert rendered
+    == "{\"execution\":{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"running\",\"current_node_id\":\"node-2\",\"started_at\":5,\"completed_at\":null},\"action\":{\"type\":\"flow_complete\"}}"
 }
 
 pub fn json_logs_include_paging_test() {
@@ -358,16 +463,12 @@ pub fn task_path_renders_breadcrumb_test() {
 
 pub fn flow_cancelled_renders_status_test() {
   let state =
-    models.ExecutionState(
+    models.ExecutionSummary(
       id: "state-1",
-      flow_instance: empty_instance(),
+      instance_id: "flow-1",
       task_id: "task-1",
       status: models.ExecCancelled,
       current_node_id: None,
-      step_history: [],
-      loop_counters: dict.new(),
-      variables: dict.new(),
-      parallel_active: [],
       started_at: Some(1),
       completed_at: Some(99),
     )
@@ -379,6 +480,7 @@ pub fn flow_cancelled_renders_status_test() {
   let json = render.render_json(output)
   assert string.contains(json, "\"instance_id\":\"flow-1\"")
   assert string.contains(json, "\"status\":\"cancelled\"")
+  assert string.contains(json, "\"completed_at\":99")
 }
 
 // ─── code references ────────────────────────────────────────────────────────
@@ -525,18 +627,5 @@ fn sample_artifact() -> models.Artifact {
     content: content,
     created_at: 1,
     updated_at: 2,
-  )
-}
-
-fn empty_instance() -> models.FlowInstance {
-  models.FlowInstance(
-    id: "",
-    template_id: "",
-    task_id: "",
-    nodes: dict.new(),
-    transitions: [],
-    initial_node_id: "",
-    on_done_template_id: None,
-    on_reject_template_id: None,
   )
 }

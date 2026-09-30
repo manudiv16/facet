@@ -63,14 +63,53 @@ pub fn node_type_rejects_unknown_value_test() {
   let assert Error(_) = json.parse("\"magic\"", models.decode_node_type())
 }
 
-pub fn action_rejects_unknown_kind_test() {
+pub fn action_rejects_unknown_type_test() {
   let assert Error(_) =
-    json.parse("{\"kind\":\"teleport\"}", models.decode_action())
+    json.parse("{\"type\":\"teleport\"}", models.decode_action())
 }
 
 pub fn action_decodes_complete_test() {
   let assert Ok(models.FlowComplete) =
-    json.parse("{\"kind\":\"flow_complete\"}", models.decode_action())
+    json.parse("{\"type\":\"flow_complete\"}", models.decode_action())
+}
+
+pub fn action_decodes_engine_run_step_test() {
+  // Crystalline tags the action with `"type"` and nests the node
+  // (`action_body/1` in `http/routes/flows.gleam`).
+  let assert Ok(action) =
+    json.parse(
+      "{\"type\":\"run_step\",\"node\":{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand\"},\"prompt\":\"do it\"}",
+      models.decode_action(),
+    )
+  let assert models.RunStep(node, prompt) = action
+  assert node.id == "n1"
+  assert node.goal == "Understand"
+  assert prompt == "do it"
+}
+
+pub fn action_decodes_engine_await_input_test() {
+  let assert Ok(action) =
+    json.parse(
+      "{\"type\":\"await_input\",\"node\":{\"id\":\"n3\",\"name\":\"Confirm\",\"node_type\":\"human_input\"}}",
+      models.decode_action(),
+    )
+  let assert models.AwaitInput(node) = action
+  assert node.id == "n3"
+  assert node.node_type == models.HumanInput
+}
+
+pub fn action_decodes_engine_execution_error_test() {
+  let assert Ok(action) =
+    json.parse(
+      "{\"type\":\"execution_error\",\"message\":\"model blew up\"}",
+      models.decode_action(),
+    )
+  assert action == models.ExecutionError("model blew up")
+}
+
+pub fn encode_action_uses_the_engine_type_field_test() {
+  let encoded = models.encode_action(models.FlowComplete) |> models.encode_json
+  assert encoded == "{\"type\":\"flow_complete\"}"
 }
 
 // ─── Round-trips ────────────────────────────────────────────────────────────
@@ -149,8 +188,106 @@ pub fn flow_template_round_trip_test() {
     )
 
   let encoded = models.encode_flow_template(template) |> models.encode_json
+  // The engine stores the graph keyed by id but serialises it as an array.
+  assert string.contains(encoded, "\"nodes\":[{\"id\":\"n1\"")
   let assert Ok(decoded) = json.parse(encoded, models.decode_flow_template())
   assert decoded == template
+}
+
+pub fn flow_template_decodes_the_engine_node_array_test() {
+  let assert Ok(template) =
+    json.parse(
+      "{\"id\":\"linear\",\"slug\":\"linear\",\"name\":\"Linear\",\"description\":\"\",\"initial_node_id\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand\"},{\"id\":\"n2\",\"name\":\"Implement\",\"node_type\":\"step\",\"goal\":\"Build it\"}],\"transitions\":[{\"id\":\"t1\",\"from_id\":\"n1\",\"to_id\":\"n2\",\"condition\":null,\"label\":null}],\"on_done_template_id\":null,\"on_reject_template_id\":null}",
+      models.decode_flow_template(),
+    )
+  assert list.sort(dict.keys(template.nodes), string.compare) == ["n1", "n2"]
+  let assert Ok(node) = dict.get(template.nodes, "n2")
+  assert node.name == "Implement"
+  let assert [transition] = template.transitions
+  assert transition.from_id == "n1"
+  assert transition.to_id == "n2"
+}
+
+pub fn flow_instance_decodes_the_engine_instance_body_test() {
+  let assert Ok(instance) =
+    json.parse(
+      "{\"id\":\"flow-1\",\"template_id\":\"linear\",\"task_id\":\"task-1\",\"initial_node_id\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand\"}],\"transitions\":[],\"on_done_template_id\":null,\"on_reject_template_id\":null}",
+      models.decode_flow_instance(),
+    )
+  assert instance.id == "flow-1"
+  assert instance.task_id == "task-1"
+  assert list.sort(dict.keys(instance.nodes), string.compare) == ["n1"]
+}
+
+// ─── Engine envelopes ───────────────────────────────────────────────────────
+
+pub fn flow_instantiation_decodes_the_start_envelope_test() {
+  let assert Ok(started) =
+    json.parse(
+      "{\"instance\":{\"id\":\"flow-1\",\"template_id\":\"linear\",\"task_id\":\"task-1\",\"initial_node_id\":\"n1\",\"nodes\":[{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand\"}],\"transitions\":[],\"on_done_template_id\":null,\"on_reject_template_id\":null},\"execution\":{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"pending\",\"current_node_id\":null,\"started_at\":null,\"completed_at\":null}}",
+      models.decode_flow_instantiation(),
+    )
+  assert started.instance.id == "flow-1"
+  assert started.execution.status == models.ExecPending
+  assert started.execution.instance_id == "flow-1"
+  assert started.execution.current_node_id == None
+  assert started.execution.started_at == None
+}
+
+pub fn execution_step_decodes_the_run_step_envelope_test() {
+  let assert Ok(step) =
+    json.parse(
+      "{\"execution\":{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"running\",\"current_node_id\":\"n1\",\"started_at\":5,\"completed_at\":null},\"action\":{\"type\":\"run_step\",\"node\":{\"id\":\"n1\",\"name\":\"Research\",\"node_type\":\"step\",\"goal\":\"Understand\"},\"prompt\":\"do it\"}}",
+      models.decode_execution_step(),
+    )
+  assert step.execution.status == models.ExecRunning
+  assert step.execution.current_node_id == Some("n1")
+  assert step.execution.started_at == Some(5)
+  let assert models.RunStep(node, prompt) = step.action
+  assert node.id == "n1"
+  assert prompt == "do it"
+}
+
+pub fn execution_step_decodes_the_terminal_envelope_test() {
+  let assert Ok(step) =
+    json.parse(
+      "{\"execution\":{\"id\":\"exec-1\",\"instance_id\":\"flow-1\",\"task_id\":\"task-1\",\"status\":\"completed\",\"current_node_id\":\"n2\",\"started_at\":5,\"completed_at\":30},\"action\":{\"type\":\"flow_complete\"}}",
+      models.decode_execution_step(),
+    )
+  assert step.execution.status == models.ExecCompleted
+  assert step.execution.completed_at == Some(30)
+  assert step.action == models.FlowComplete
+}
+
+pub fn execution_step_round_trip_test() {
+  let step =
+    models.ExecutionStep(
+      execution: models.ExecutionSummary(
+        id: "exec-1",
+        instance_id: "flow-1",
+        task_id: "task-1",
+        status: models.ExecAwaitingInput,
+        current_node_id: Some("n3"),
+        started_at: Some(5),
+        completed_at: None,
+      ),
+      action: models.AwaitInput(models.FlowNode(
+        id: "n3",
+        name: "Confirm",
+        node_type: models.HumanInput,
+        goal: "Get confirmation",
+        prompt: None,
+        child_ids: [],
+        branch_rules: [],
+        loop_config: None,
+        agent_config: None,
+        output_schema: None,
+      )),
+    )
+  let encoded = models.encode_execution_step(step) |> models.encode_json
+  assert string.contains(encoded, "\"type\":\"await_input\"")
+  let assert Ok(decoded) = json.parse(encoded, models.decode_execution_step())
+  assert decoded == step
 }
 
 pub fn step_execution_round_trip_test() {

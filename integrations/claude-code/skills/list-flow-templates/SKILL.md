@@ -29,10 +29,11 @@ facet --json flow templates show <template-id>
 - `flow templates` prints a JSON **array of summaries**: `id` (use this with
   `facet --json flow start <task-id> <template-id>`), `slug`, `name`, `description`,
   `initial_node_id`, `node_count`, `transition_count`. The list endpoint does not
-  return the graph itself, so `nodes` decodes as `{}` here — read `node_count` to size
-  the flow instead.
-- `flow templates show` prints a single template **with** its graph: `nodes` (map of
-  node id → `{id, name, node_type, goal, prompt, child_ids, branch_rules, …}`),
+  return the graph itself, so `nodes` is empty here — read `node_count` to size the
+  flow instead.
+- `flow templates show` prints a single template **with** its graph: `nodes` (an array of
+  `{id, name, node_type, goal, prompt, child_ids, branch_rules, …}` — the node id is the
+  `id` field, the CLI renders it keyed by that id but the JSON keeps the engine's array),
   `transitions` (list of `{id, from_id, to_id, condition}`), plus
   `on_done_template_id` and `on_reject_template_id`. This is the object to read to
   understand the workflow's shape.

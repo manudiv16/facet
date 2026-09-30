@@ -18,18 +18,20 @@ without doing the step is a lie to the engine — only call this once the work e
 facet --json flow complete-step <instance-id> <step-id> --output "passed: 18 tests, no failures"
 ```
 
-`<step-id>` is the `node.id` from the `run_step` action. `--output` must be non-empty:
-it is stored as the step's result and feeds the next node's prompt.
+`<step-id>` is the `node.id` from the `run_step` action — the node the engine is
+currently running (it completes that node itself and echoes the id in the output).
+`--output` must be non-empty: it is stored as the step's result and feeds the next
+node's prompt.
 
 ## Interpreting the output
 
-- stdout is one JSON object: `instance_id`, `step_id`, and `state` — the flow's full
-  execution state (`status`, `current_node_id`, `step_history`, `variables`,
-  `loop_counters`, `started_at`, `completed_at`).
-- exit 0 means the engine recorded the result. The flow has not moved on by itself:
-  call `facet --json flow advance <instance-id>` to get the next action, and repeat
-  until the action's `kind` is `flow_complete`.
+- stdout is one JSON object: `step_id`, `execution` (the state after the step — `id`,
+  `instance_id`, `task_id`, `status`, `current_node_id`, `started_at`,
+  `completed_at`) and `action` (the engine's next action, tagged `type`).
+- exit 0 means the engine recorded the result and answered with the next action. Call
+  `facet --json flow advance <instance-id>` to act on it, and repeat until the action's
+  `type` is `flow_complete`.
 - exit 1: `facet: flow complete-step expects --output <text>` when the output was
-  empty, or the engine's error body on stderr (wrong `instance-id` or a `step-id` that
-  is not the running step). The state is unchanged, so re-read it with
-  `facet --json flow status <instance-id>` before retrying.
+  empty, or the engine's error body on stderr (an unknown `instance-id`, or an
+  execution that is not `running`). The execution is unchanged, so re-read the task
+  with `facet --json task show <task-id>` before retrying.
