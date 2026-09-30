@@ -31,17 +31,29 @@
 		void active.load();
 		const fromUrl = $page.url.searchParams.get("task");
 		if (fromUrl) selectTask(fromUrl, false);
+		// The event stream is keyed per execution, so this cross-task list has
+		// nothing to subscribe to: refresh it on demand and when the window
+		// regains focus instead of polling it.
+		window.addEventListener("focus", refreshActive);
+		document.addEventListener("visibilitychange", onVisibility);
 	});
 
 	onDestroy(() => {
-		active.destroy();
+		window.removeEventListener("focus", refreshActive);
+		document.removeEventListener("visibilitychange", onVisibility);
 	});
+
+	function refreshActive(): void {
+		if (!taskId) void active.refresh();
+	}
+
+	function onVisibility(): void {
+		if (document.visibilityState === "visible") refreshActive();
+	}
 
 	function selectTask(id: string, syncUrl = true): void {
 		const next = id.trim();
 		if (next === taskId) return;
-		// The overview store must not keep polling while a task history is shown.
-		active.destroy();
 		taskId = next;
 		if (syncUrl) {
 			void goto(`/executions?task=${encodeURIComponent(next)}`, {
@@ -142,11 +154,19 @@
 		<section class="overview">
 			<div class="overview-head">
 				<h2>Active executions</h2>
-				<p class="subtitle">
-					Steps currently running or awaiting input across tasks. Select one to
-					open its task history and session log.
-				</p>
+				<button
+					type="button"
+					class="btn btn-ghost"
+					on:click={() => active.refresh()}
+					disabled={$activeLoading}
+				>
+					Refresh
+				</button>
 			</div>
+			<p class="subtitle">
+				Steps currently running or awaiting input across tasks. Select one to
+				open its task history and session log; the history streams live.
+			</p>
 
 			{#if $activeError}
 				<p class="banner banner-error" role="alert">{$activeError}</p>
@@ -297,8 +317,15 @@
 		gap: 0.75rem;
 	}
 
+	.overview-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+
 	.overview-head h2 {
-		margin: 0 0 0.25rem;
+		margin: 0;
 		font-size: 1.15rem;
 	}
 

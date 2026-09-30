@@ -2,27 +2,45 @@
   import { onMount, onDestroy } from 'svelte';
   import { useSessionLog } from '$lib/stores';
   import { formatTime } from '$lib/format';
+  import type { StepStatusFrame } from '$lib/execution-stream';
 
   export let executionId: string;
   export let status: string = 'pending';
+  // The parent table listens so the row's status follows the stream too.
+  export let onStepStatus: ((frame: StepStatusFrame) => void) | undefined = undefined;
 
   const MAX_TOOL_OUTPUT = 500;
 
   // A stable per-instance store; the parent keys the component by executionId
-  // so switching executions re-mounts it.
-  const logStore = useSessionLog(executionId);
-  const { events, loading, loadingOlder, error, hasMore, polling } = logStore;
+  // so switching executions re-mounts it. The REST backlog loads first; the
+  // engine's event stream appends from there.
+  const logStore = useSessionLog(executionId, {
+    onStepStatus: (frame) => onStepStatus?.(frame),
+  });
+  const { events, loading, loadingOlder, error, hasMore, live, streamState, gap } = logStore;
 
   onMount(() => {
-    logStore.init(status);
+    void logStore.init(status);
   });
 
   onDestroy(() => {
     logStore.destroy();
   });
 
-  // Whenever the execution reaches a terminal status, stop refreshing.
+  // Whenever the execution reaches a terminal status, close the stream: the
+  // REST backlog is the whole story from then on.
   $: logStore.updateStatus(status);
+
+  function gapLabel(reason: string): string {
+    switch (reason) {
+      case 'sequence_gap':
+        return 'missed events — reloaded from the API';
+      case 'restart':
+        return 'engine restarted — reloaded from the API';
+      default:
+        return 'reconnected — reloaded from the API';
+    }
+  }
 
   function truncateOutput(output: string): { text: string; truncated: boolean } {
     if (output.length <= MAX_TOOL_OUTPUT) return { text: output, truncated: false };
@@ -44,15 +62,30 @@
   <div class="log-toolbar">
     <h3>Session log</h3>
     <div class="log-meta">
-      {#if $polling}
-        <span class="live-dot" title="Refreshing every 3s"></span>
+      {#if $live}
+        <span class="live-dot" title="Streaming engine events"></span>
         <span class="live-label">live</span>
+      {:else if $streamState === 'connecting' || $streamState === 'reconnecting'}
+        <span class="live-dot reconnecting" title="Reconnecting to the event stream"></span>
+        <span class="live-label">reconnecting</span>
       {/if}
       <span class="event-count">
         {$events.length} event{$events.length === 1 ? '' : 's'}
       </span>
+      <button
+        type="button"
+        class="refresh"
+        on:click={() => logStore.refresh()}
+        disabled={$loading}
+      >
+        Refresh
+      </button>
     </div>
   </div>
+
+  {#if $gap}
+    <p class="gap-note" role="status">{gapLabel($gap.reason)}</p>
+  {/if}
 
   {#if $loading}
     <div class="loading">Loading session log…</div>
@@ -164,6 +197,40 @@
     border-radius: 50%;
     background: var(--success, #22c55e);
     box-shadow: 0 0 6px var(--success, #22c55e);
+  }
+
+  .live-dot.reconnecting {
+    background: var(--warning, #f59e0b);
+    box-shadow: 0 0 6px var(--warning, #f59e0b);
+  }
+
+  .refresh {
+    padding: 0.15rem 0.5rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .refresh:hover:not(:disabled) {
+    background: var(--surface-3);
+  }
+
+  .refresh:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .gap-note {
+    margin: 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--warning, #f59e0b);
+    font-size: 0.75rem;
   }
 
   .loading,

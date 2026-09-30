@@ -1,21 +1,33 @@
-// F6 acceptance tests for the execution history / session log stores.
+// C20 acceptance tests for the execution history / session log stores.
 //
 // Verifies the behaviour behind the acceptance criteria:
 //   - a completed flow renders via one row per step with correct totals
 //     (history store aggregates);
-//   - polling refreshes every 3s while a step is in_progress and stops as soon
-//     as every visible execution is terminal;
-//   - page 2 (older) loads arrive via limit+before_sequence and are prepended
-//     without duplicates, keeping a single chronological/ordering invariant.
+//   - page 2 (older) loads arrive via limit+before_sequence and are appended
+//     without duplicates, keeping a single ordering invariant;
+//   - the stores no longer poll: the REST backlog loads first and the engine's
+//     event stream applies transitions and appends log rows as they arrive;
+//   - a stream gap re-pages the REST backlog instead of trusting the stream.
+//
+// `EventSource` itself is covered by `execution-stream.test.ts`; here the
+// stream factory is faked so the store's frame handling is what is under test.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 import type { Execution, SessionEvent } from "./types";
+import type {
+	ExecutionStream,
+	ExecutionStreamFrame,
+	ExecutionStreamHandlers,
+	StreamGap,
+	StreamState,
+} from "./execution-stream";
 
 const mocks = vi.hoisted(() => ({
 	listExecutions: vi.fn(),
 	listActiveExecutions: vi.fn(),
 	getExecution: vi.fn(),
 	getSessionLog: vi.fn(),
+	createExecutionStream: vi.fn(),
 }));
 
 vi.mock("./executions-api", async () => {
@@ -32,16 +44,101 @@ vi.mock("./executions-api", async () => {
 	};
 });
 
-import { useExecutionHistory, useSessionLog } from "./stores";
+vi.mock("./backend", () => ({
+	resolveBaseUrl: () => Promise.resolve("http://127.0.0.1:8787"),
+}));
+
+vi.mock("./execution-stream", async () => {
+	const actual =
+		await vi.importActual<typeof import("./execution-stream")>(
+			"./execution-stream",
+		);
+	return {
+		...actual,
+		authToken: () => null,
+		createExecutionStream: mocks.createExecutionStream,
+	};
+});
+
+import {
+	createActiveExecutionsStore,
+	useExecutionHistory,
+	useSessionLog,
+} from "./stores";
+
+/** A fake of the SSE client, exposing the handlers the store registered. */
+class FakeStream implements ExecutionStream {
+	readonly executionId: string;
+	readonly handlers: ExecutionStreamHandlers;
+	started = false;
+	stopped = false;
+	currentState: StreamState = "idle";
+
+	constructor(options: {
+		executionId: string;
+		handlers: ExecutionStreamHandlers;
+	}) {
+		this.executionId = options.executionId;
+		this.handlers = options.handlers;
+	}
+
+	start(): void {
+		this.started = true;
+	}
+
+	close(): void {
+		this.stopped = true;
+	}
+
+	state(): StreamState {
+		return this.currentState;
+	}
+
+	lastSequence(): number | null {
+		return null;
+	}
+
+	redactedUrl(): string {
+		return `http://127.0.0.1:8787/api/v1/executions/${this.executionId}/events`;
+	}
+
+	frame(frame: ExecutionStreamFrame): void {
+		this.handlers.onFrame(frame);
+	}
+
+	open(): void {
+		this.currentState = "open";
+		this.handlers.onState?.("open");
+	}
+
+	gap(gap: StreamGap): void {
+		this.handlers.onGap?.(gap);
+	}
+}
+
+let streams: FakeStream[] = [];
+
+/** Let the store's `await resolveBaseUrl()` and stream creation settle. */
+async function settle(): Promise<void> {
+	for (let tick = 0; tick < 4; tick++) await Promise.resolve();
+}
 
 beforeEach(() => {
 	vi.resetAllMocks();
 	vi.useFakeTimers();
-	// The stores schedule polling via `window.setInterval`; under the node
-	// environment the browser global is absent, so hand them the (faked) timer.
+	streams = [];
+	mocks.createExecutionStream.mockImplementation(
+		(options: { executionId: string; handlers: ExecutionStreamHandlers }) => {
+			const stream = new FakeStream(options);
+			streams.push(stream);
+			return stream;
+		},
+	);
+	// The stores schedule their debounce/resync via `window.*` timers; under the
+	// node environment the browser global is absent, so hand them the faked one.
 	vi.stubGlobal("window", {
-		setInterval: globalThis.setInterval,
-		clearInterval: globalThis.clearInterval,
+		setTimeout: globalThis.setTimeout,
+		clearTimeout: globalThis.clearTimeout,
 	});
 });
 
@@ -93,8 +190,26 @@ function eventPage(from: number, to: number): SessionEvent[] {
 	return rows;
 }
 
+/** A `session_log` frame as the engine publishes it for one log row. */
+function sessionLogFrame(seq: number): ExecutionStreamFrame {
+	return {
+		type: "session_log",
+		event_sequence: seq,
+		execution_id: "exec-1",
+		log: {
+			id: `ev-${seq}`,
+			step_execution_id: "exec-1",
+			task_id: "task-1",
+			event_type: "text",
+			payload: JSON.stringify({ content: `event ${seq}` }),
+			sequence: seq,
+			created_at: 1_751_234_567_000,
+		},
+	};
+}
+
 describe("execution history store", () => {
-	it("loads one row per completed step with correct footer totals and no polling", async () => {
+	it("loads one row per completed step with correct footer totals and no stream", async () => {
 		mocks.listExecutions.mockResolvedValue({
 			executions: [
 				execRow(2, {
@@ -119,6 +234,7 @@ describe("execution history store", () => {
 
 		const store = useExecutionHistory("task-1");
 		await store.load();
+		await settle();
 
 		expect(get(store.executions)).toHaveLength(2);
 		expect(get(store.executions).map((e) => e.node_id)).toEqual([
@@ -131,40 +247,154 @@ describe("execution history store", () => {
 			total_cost: 0.0632,
 			total_duration_ms: 13450,
 		});
-		expect(get(store.polling)).toBe(false);
 		expect(get(store.hasMore)).toBe(false);
+		// Nothing is running: there is no execution to stream.
+		expect(mocks.createExecutionStream).not.toHaveBeenCalled();
 		store.destroy();
 	});
 
-	it("polls every 3s while a step is in_progress and stops once terminal", async () => {
+	it("streams the active flow and resyncs the list on a transition", async () => {
 		mocks.listExecutions
 			.mockResolvedValueOnce({
-				executions: [execRow(1, { id: "live", status: "in_progress" })],
+				executions: [
+					execRow(1, {
+						id: "step-1",
+						status: "in_progress",
+						execution_state_id: "state-1",
+					}),
+				],
 				has_more: false,
 			})
 			.mockResolvedValueOnce({
-				executions: [execRow(1, { id: "live", status: "completed" })],
+				executions: [
+					execRow(2, {
+						id: "step-2",
+						status: "awaiting_input",
+						execution_state_id: "state-1",
+					}),
+					execRow(1, {
+						id: "step-1",
+						status: "completed",
+						execution_state_id: "state-1",
+					}),
+				],
 				has_more: false,
 			});
 
 		const store = useExecutionHistory("task-1");
 		await store.load();
+		await settle();
 
-		expect(get(store.polling)).toBe(true);
-		expect(mocks.listExecutions).toHaveBeenCalledTimes(1);
+		expect(streams).toHaveLength(1);
+		expect(streams[0].executionId).toBe("state-1");
+		expect(streams[0].started).toBe(true);
 
-		await vi.advanceTimersByTimeAsync(3000);
+		streams[0].open();
+		expect(get(store.live)).toBe(true);
+
+		streams[0].frame({
+			type: "execution_status",
+			event_sequence: 1,
+			execution_id: "state-1",
+			status: "running",
+			current_node_id: "build",
+			updated_at: 1_751_234_567_000,
+		});
+		expect(get(store.flow)).toEqual({
+			status: "running",
+			current_node_id: "build",
+			updated_at: 1_751_234_567_000,
+		});
+
+		// The transition is coalesced into one REST resync, which brings in the
+		// step the flow just entered — the polling replacement.
+		await vi.advanceTimersByTimeAsync(1000);
 		expect(mocks.listExecutions).toHaveBeenCalledTimes(2);
-		expect(get(store.executions)[0].status).toBe("completed");
-		expect(get(store.polling)).toBe(false);
-
-		// No further refreshes after the terminal state.
-		await vi.advanceTimersByTimeAsync(9000);
-		expect(mocks.listExecutions).toHaveBeenCalledTimes(2);
+		expect(get(store.executions).map((e) => e.id)).toEqual(["step-2", "step-1"]);
 		store.destroy();
 	});
 
-	it("prepends page 2 via before_sequence without duplicates and recomputes totals", async () => {
+	it("applies a step_status frame to its row in place", async () => {
+		mocks.listExecutions.mockResolvedValue({
+			executions: [
+				execRow(1, {
+					id: "step-1",
+					status: "in_progress",
+					execution_state_id: "state-1",
+					completed_at: null,
+				}),
+			],
+			has_more: false,
+		});
+
+		const store = useExecutionHistory("task-1");
+		await store.load();
+		await settle();
+
+		store.applyStepStatus({
+			type: "step_status",
+			event_sequence: 4,
+			execution_id: "step-1",
+			node_id: "build",
+			status: "completed",
+			output: "done",
+			session_id: "sess-1",
+			completed_at: 1_751_234_567_000,
+		});
+
+		const row = get(store.executions)[0];
+		expect(row.status).toBe("completed");
+		expect(row.output).toBe("done");
+		expect(row.completed_at).toBe(
+			new Date(1_751_234_567_000).toISOString(),
+		);
+		// A frame for an unknown execution is ignored, not appended.
+		store.applyStepStatus({
+			type: "step_status",
+			event_sequence: 5,
+			execution_id: "someone-else",
+			node_id: "other",
+			status: "completed",
+			output: null,
+			session_id: null,
+			completed_at: null,
+		});
+		expect(get(store.executions)).toHaveLength(1);
+		store.destroy();
+	});
+
+	it("resyncs over REST when the stream reports a gap", async () => {
+		mocks.listExecutions
+			.mockResolvedValueOnce({
+				executions: [execRow(1, { id: "step-1", status: "in_progress" })],
+				has_more: false,
+			})
+			.mockResolvedValueOnce({
+				executions: [
+					execRow(2, { id: "step-2", status: "completed" }),
+					execRow(1, { id: "step-1", status: "completed" }),
+				],
+				has_more: false,
+			});
+
+		const store = useExecutionHistory("task-1");
+		await store.load();
+		await settle();
+
+		streams[0].gap({
+			reason: "reconnect",
+			expected_sequence: 3,
+			received_sequence: 9,
+		});
+		await settle();
+
+		expect(get(store.gap)?.reason).toBe("reconnect");
+		expect(mocks.listExecutions).toHaveBeenCalledTimes(2);
+		expect(get(store.executions).map((e) => e.id)).toEqual(["step-2", "step-1"]);
+		store.destroy();
+	});
+
+	it("appends page 2 via before_sequence without duplicates and recomputes totals", async () => {
 		mocks.listExecutions
 			.mockResolvedValueOnce({ executions: execPage(120, 71), has_more: true })
 			.mockResolvedValueOnce({ executions: execPage(70, 21), has_more: false });
@@ -179,7 +409,7 @@ describe("execution history store", () => {
 		expect(mocks.listExecutions).toHaveBeenLastCalledWith("task-1", 50, 71);
 		const all = get(store.executions);
 		expect(all).toHaveLength(100);
-		// Newest-first invariant holds across the prepended pages.
+		// Newest-first invariant holds across the appended pages.
 		const sequences = all.map((e) => e.sequence!);
 		expect(sequences[0]).toBe(120);
 		expect(sequences[99]).toBe(21);
@@ -197,73 +427,149 @@ describe("execution history store", () => {
 });
 
 describe("session log store", () => {
-	it("loads the newest page then prepends older events on loadOlder", async () => {
-		mocks.getSessionLog
-			.mockResolvedValueOnce({ events: eventPage(200, 101), has_more: true })
-			.mockResolvedValueOnce({ events: eventPage(100, 1), has_more: false });
+	it("loads the REST backlog first, then appends streamed events in order", async () => {
+		mocks.getSessionLog.mockResolvedValue({
+			events: eventPage(100, 99),
+			has_more: true,
+		});
 
 		const store = useSessionLog("exec-1");
-		await store.init("completed");
+		await store.init("in_progress");
+		await settle();
 
-		expect(get(store.events)).toHaveLength(100);
-		expect(get(store.events)[0].sequence).toBe(101);
-		expect(get(store.events)[99].sequence).toBe(200);
+		// The backlog is on screen before the stream starts.
+		expect(get(store.events).map((e) => e.sequence)).toEqual([99, 100]);
 		expect(get(store.hasMore)).toBe(true);
+		expect(streams).toHaveLength(1);
+		expect(streams[0].executionId).toBe("exec-1");
+		expect(streams[0].started).toBe(true);
 
-		await store.loadOlder();
+		streams[0].open();
+		expect(get(store.live)).toBe(true);
+		expect(get(store.streamState)).toBe("open");
 
-		expect(mocks.getSessionLog).toHaveBeenLastCalledWith("exec-1", 100, 101);
+		streams[0].frame(sessionLogFrame(101));
+		streams[0].frame(sessionLogFrame(102));
+		// A duplicate row (resume overlap) must not be appended twice.
+		streams[0].frame(sessionLogFrame(102));
+
 		const all = get(store.events);
-		expect(all).toHaveLength(200);
-		// Chronological invariant: strictly ascending sequence, no duplicates.
-		expect(all[0].sequence).toBe(1);
-		expect(all[199].sequence).toBe(200);
-		for (let i = 1; i < all.length; i++) {
-			expect(all[i].sequence).toBeGreaterThan(all[i - 1].sequence);
-		}
-		expect(get(store.hasMore)).toBe(false);
+		expect(all.map((e) => e.sequence)).toEqual([99, 100, 101, 102]);
+		expect(all[3].kind).toBe("text");
+		expect(all[3].data).toEqual({ content: "event 102" });
+		expect(get(store.hasMore)).toBe(true);
 		store.destroy();
 	});
 
-	it("starts polling on in_progress and stops the terminal refresh on completion", async () => {
+	it("does not open a stream for an execution that already finished", async () => {
 		mocks.getSessionLog.mockResolvedValue({
 			events: eventPage(3, 1),
 			has_more: false,
 		});
 
 		const store = useSessionLog("exec-1");
+		await store.init("completed");
+		await settle();
+
+		expect(mocks.createExecutionStream).not.toHaveBeenCalled();
+		expect(get(store.live)).toBe(false);
+		expect(get(store.streamState)).toBe("idle");
+		store.destroy();
+	});
+
+	it("closes the stream once the execution reaches a terminal status", async () => {
+		mocks.getSessionLog.mockResolvedValue({ events: [], has_more: false });
+
+		const store = useSessionLog("exec-1");
 		await store.init("in_progress");
-		expect(get(store.polling)).toBe(true);
+		await settle();
+		streams[0].open();
+		expect(get(store.live)).toBe(true);
 
 		store.updateStatus("completed");
-		expect(get(store.polling)).toBe(false);
 
-		await vi.advanceTimersByTimeAsync(9000);
-		expect(mocks.getSessionLog).toHaveBeenCalledTimes(1);
+		expect(streams[0].stopped).toBe(true);
+		expect(get(store.live)).toBe(false);
+		// No reconnect is attempted once the stream is closed.
+		expect(mocks.createExecutionStream).toHaveBeenCalledTimes(1);
 		store.destroy();
 	});
 
-	it("never polls when initialised with a terminal status", async () => {
-		mocks.getSessionLog.mockResolvedValue({ events: [], has_more: false });
-		const store = useSessionLog("exec-1");
-		await store.init("completed");
-		expect(get(store.polling)).toBe(false);
-		store.destroy();
-	});
-
-	it("polling appends only fresh events and never duplicates", async () => {
+	it("re-pages the REST backlog when the stream reports a gap", async () => {
 		mocks.getSessionLog
-			.mockResolvedValueOnce({ events: eventPage(5, 1), has_more: false })
-			.mockResolvedValue({ events: eventPage(6, 1), has_more: false });
+			.mockResolvedValueOnce({ events: eventPage(3, 1), has_more: false })
+			.mockResolvedValueOnce({ events: eventPage(6, 1), has_more: false });
 
 		const store = useSessionLog("exec-1");
 		await store.init("in_progress");
-		expect(get(store.events)).toHaveLength(5);
+		await settle();
+		streams[0].frame(sessionLogFrame(4));
 
-		await vi.advanceTimersByTimeAsync(3000);
-		const all = get(store.events);
-		expect(all).toHaveLength(6);
-		expect(all.map((e) => e.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
+		streams[0].gap({
+			reason: "sequence_gap",
+			expected_sequence: 5,
+			received_sequence: 9,
+		});
+		await settle();
+
+		expect(get(store.gap)?.reason).toBe("sequence_gap");
+		// The REST page is authoritative after a gap: the missed rows 5 and 6
+		// arrive, ordered, without duplicating 1..4.
+		expect(get(store.events).map((e) => e.sequence)).toEqual([
+			1, 2, 3, 4, 5, 6,
+		]);
 		store.destroy();
+	});
+
+	it("forwards step transitions to the caller so the history row follows", async () => {
+		mocks.getSessionLog.mockResolvedValue({ events: [], has_more: false });
+		const onStepStatus = vi.fn();
+
+		const store = useSessionLog("exec-1", { onStepStatus });
+		await store.init("in_progress");
+		await settle();
+
+		const frame: ExecutionStreamFrame = {
+			type: "step_status",
+			event_sequence: 2,
+			execution_id: "exec-1",
+			node_id: "build",
+			status: "completed",
+			output: "done",
+			session_id: null,
+			completed_at: 1_751_234_567_000,
+		};
+		streams[0].frame(frame);
+
+		expect(onStepStatus).toHaveBeenCalledWith(frame);
+		// Flow-level frames belong to the history store, not the log feed.
+		streams[0].frame({
+			type: "execution_status",
+			event_sequence: 3,
+			execution_id: "state-1",
+			status: "running",
+			current_node_id: "build",
+			updated_at: 1_751_234_567_000,
+		});
+		expect(get(store.events)).toEqual([]);
+		store.destroy();
+	});
+});
+
+describe("active executions store", () => {
+	it("loads the cross-task list on demand and on refresh", async () => {
+		mocks.listActiveExecutions
+			.mockResolvedValueOnce({
+				executions: [execRow(1, { id: "step-1", status: "running" })],
+				has_more: false,
+			})
+			.mockResolvedValueOnce({ executions: [], has_more: false });
+
+		const store = createActiveExecutionsStore();
+		await store.load();
+		expect(get(store.executions)).toHaveLength(1);
+
+		await store.refresh();
+		expect(get(store.executions)).toHaveLength(0);
 	});
 });
