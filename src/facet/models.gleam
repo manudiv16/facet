@@ -279,6 +279,146 @@ pub fn node_type_decoder() -> decode.Decoder(NodeType) {
   decode_node_type()
 }
 
+// ─── Projects ───────────────────────────────────────────────────────────────
+
+/// A workspace. Tasks, sections and the artifact list are scoped to one
+/// project through the `X-Crystalline-Project` header, which accepts a
+/// project id or slug.
+pub type Project {
+  Project(
+    id: String,
+    slug: String,
+    name: String,
+    description: String,
+    created_at: Int,
+    updated_at: Int,
+  )
+}
+
+pub fn encode_project(project: Project) -> json.Json {
+  json.object([
+    #("id", json.string(project.id)),
+    #("slug", json.string(project.slug)),
+    #("name", json.string(project.name)),
+    #("description", json.string(project.description)),
+    #("created_at", json.int(project.created_at)),
+    #("updated_at", json.int(project.updated_at)),
+  ])
+}
+
+pub fn decode_project() -> decode.Decoder(Project) {
+  use id <- decode.field("id", decode.string)
+  use slug <- decode.field("slug", decode.string)
+  use name <- decode.optional_field("name", "", decode.string)
+  use description <- decode.optional_field("description", "", decode.string)
+  use created_at <- decode.optional_field("created_at", 0, decode.int)
+  use updated_at <- decode.optional_field("updated_at", 0, decode.int)
+  decode.success(Project(
+    id:,
+    slug:,
+    name:,
+    description:,
+    created_at:,
+    updated_at:,
+  ))
+}
+
+pub fn project_decoder() -> decode.Decoder(Project) {
+  decode_project()
+}
+
+/// Body for `POST /api/v1/projects`.
+pub type ProjectCreate {
+  ProjectCreate(slug: String, name: String)
+}
+
+pub fn encode_project_create(body: ProjectCreate) -> json.Json {
+  json.object([
+    #("slug", json.string(body.slug)),
+    #("name", json.string(body.name)),
+  ])
+}
+
+// ─── Artifacts ──────────────────────────────────────────────────────────────
+
+/// A JSON document stored under a task-scoped logical name. The content is
+/// arbitrary JSON and round-trips unchanged.
+pub type Artifact {
+  Artifact(
+    id: String,
+    task_id: String,
+    logical_name: String,
+    content: json.Json,
+    created_at: Int,
+    updated_at: Int,
+  )
+}
+
+pub fn encode_artifact(artifact: Artifact) -> json.Json {
+  json.object([
+    #("id", json.string(artifact.id)),
+    #("task_id", json.string(artifact.task_id)),
+    #("logical_name", json.string(artifact.logical_name)),
+    #("content", artifact.content),
+    #("created_at", json.int(artifact.created_at)),
+    #("updated_at", json.int(artifact.updated_at)),
+  ])
+}
+
+pub fn decode_artifact() -> decode.Decoder(Artifact) {
+  use id <- decode.field("id", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use logical_name <- decode.optional_field("logical_name", "", decode.string)
+  use content <- decode.field("content", json_value_decoder())
+  use created_at <- decode.optional_field("created_at", 0, decode.int)
+  use updated_at <- decode.optional_field("updated_at", 0, decode.int)
+  decode.success(Artifact(
+    id:,
+    task_id:,
+    logical_name:,
+    content:,
+    created_at:,
+    updated_at:,
+  ))
+}
+
+pub fn artifact_decoder() -> decode.Decoder(Artifact) {
+  decode_artifact()
+}
+
+/// Body for `PUT /api/v1/tasks/:task_id/artifacts/:logical_name`.
+pub type ArtifactPut {
+  ArtifactPut(content: json.Json)
+}
+
+pub fn encode_artifact_put(body: ArtifactPut) -> json.Json {
+  json.object([#("content", body.content)])
+}
+
+/// Decode any JSON value — string, number, bool, null, array or object —
+/// into `gleam/json`'s `Json` so it can be re-emitted unchanged.
+pub fn json_value_decoder() -> decode.Decoder(json.Json) {
+  use <- decode.recursive
+  decode.one_of(decode.string |> decode.map(json.string), [
+    decode.int |> decode.map(json.int),
+    decode.float |> decode.map(json.float),
+    decode.bool |> decode.map(json.bool),
+    decode.list(json_value_decoder())
+      |> decode.map(fn(values) { json.array(values, fn(value) { value }) }),
+    decode.dict(decode.string, json_value_decoder())
+      |> decode.map(fn(values) {
+        json.dict(values, fn(key) { key }, fn(value) { value })
+      }),
+    decode.optional(decode.string)
+      |> decode.map(fn(value) {
+        case value {
+          Some(text) -> json.string(text)
+          None -> json.null()
+        }
+      }),
+  ])
+}
+
 // ─── Flow models ────────────────────────────────────────────────────────────
 
 pub type BranchRule {
@@ -801,6 +941,175 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   decode_task()
 }
 
+/// `GET /api/v1/tasks/:id/path` answers `{"path": [root, …, task]}`; this
+/// yields the ordered ancestor chain root-first.
+pub fn decode_task_path() -> decode.Decoder(List(Task)) {
+  use path <- decode.field("path", decode.list(decode_task()))
+  decode.success(path)
+}
+
+pub fn task_path_decoder() -> decode.Decoder(List(Task)) {
+  decode_task_path()
+}
+
+// ─── Task sections ──────────────────────────────────────────────────────────
+
+/// The role a section plays in a task's description. Mirrors the
+/// `section_type` column of Crystalline's sections table (crystalline#16).
+pub type SectionType {
+  Goal
+  Context
+  CurrentBehavior
+  DesiredBehavior
+  ChecklistItem
+  TestingCriterion
+  Constraint
+  AntiPattern
+  FailureTest
+}
+
+pub fn section_type_to_string(section_type: SectionType) -> String {
+  case section_type {
+    Goal -> "goal"
+    Context -> "context"
+    CurrentBehavior -> "current_behavior"
+    DesiredBehavior -> "desired_behavior"
+    ChecklistItem -> "checklist_item"
+    TestingCriterion -> "testing_criterion"
+    Constraint -> "constraint"
+    AntiPattern -> "anti_pattern"
+    FailureTest -> "failure_test"
+  }
+}
+
+pub fn section_type_from_string(value: String) -> Result(SectionType, String) {
+  case value {
+    "goal" -> Ok(Goal)
+    "context" -> Ok(Context)
+    "current_behavior" -> Ok(CurrentBehavior)
+    "desired_behavior" -> Ok(DesiredBehavior)
+    "checklist_item" -> Ok(ChecklistItem)
+    "testing_criterion" -> Ok(TestingCriterion)
+    "constraint" -> Ok(Constraint)
+    "anti_pattern" -> Ok(AntiPattern)
+    "failure_test" -> Ok(FailureTest)
+    _ -> Error(value)
+  }
+}
+
+pub fn encode_section_type(section_type: SectionType) -> json.Json {
+  json.string(section_type_to_string(section_type))
+}
+
+pub fn decode_section_type() -> decode.Decoder(SectionType) {
+  strict_enum(section_type_from_string, Goal, "SectionType")
+}
+
+pub fn section_type_decoder() -> decode.Decoder(SectionType) {
+  decode_section_type()
+}
+
+/// A file reference attached to a section: the section is the entity, and a
+/// code reference is one of its fields (there is no separate code-ref
+/// resource in the engine).
+pub type CodeRef {
+  CodeRef(
+    path: String,
+    line_start: Option(Int),
+    line_end: Option(Int),
+    name: Option(String),
+    description: Option(String),
+  )
+}
+
+pub fn encode_code_ref(code_ref: CodeRef) -> json.Json {
+  json.object([
+    #("path", json.string(code_ref.path)),
+    #("line_start", json.nullable(code_ref.line_start, json.int)),
+    #("line_end", json.nullable(code_ref.line_end, json.int)),
+    #("name", json.nullable(code_ref.name, json.string)),
+    #("description", json.nullable(code_ref.description, json.string)),
+  ])
+}
+
+pub fn decode_code_ref() -> decode.Decoder(CodeRef) {
+  use path <- decode.field("path", decode.string)
+  use line_start <- decode.optional_field(
+    "line_start",
+    None,
+    decode.optional(decode.int),
+  )
+  use line_end <- decode.optional_field(
+    "line_end",
+    None,
+    decode.optional(decode.int),
+  )
+  use name <- decode.optional_field(
+    "name",
+    None,
+    decode.optional(decode.string),
+  )
+  use description <- decode.optional_field(
+    "description",
+    None,
+    decode.optional(decode.string),
+  )
+  decode.success(CodeRef(path:, line_start:, line_end:, name:, description:))
+}
+
+pub fn code_ref_decoder() -> decode.Decoder(CodeRef) {
+  decode_code_ref()
+}
+
+/// A structured part of a task's description. `code_ref` is `None` when the
+/// section carries prose only.
+pub type Section {
+  Section(
+    id: String,
+    task_id: String,
+    section_type: SectionType,
+    content: String,
+    code_ref: Option(CodeRef),
+    order: Int,
+  )
+}
+
+pub fn encode_section(section: Section) -> json.Json {
+  json.object([
+    #("id", json.string(section.id)),
+    #("task_id", json.string(section.task_id)),
+    #("section_type", encode_section_type(section.section_type)),
+    #("content", json.string(section.content)),
+    #("code_ref", json.nullable(section.code_ref, encode_code_ref)),
+    #("order", json.int(section.order)),
+  ])
+}
+
+pub fn decode_section() -> decode.Decoder(Section) {
+  use id <- decode.field("id", decode.string)
+  use task_id <- decode.optional_field("task_id", "", decode.string)
+  use section_type <- decode.field("section_type", decode_section_type())
+  use content <- decode.optional_field("content", "", decode.string)
+  use code_ref <- decode.optional_field(
+    "code_ref",
+    None,
+    decode.optional(decode_code_ref()),
+  )
+  use order <- decode.optional_field("order", 0, decode.int)
+  decode.success(Section(
+    id:,
+    task_id:,
+    section_type:,
+    content:,
+    code_ref:,
+    order:,
+  ))
+}
+
+pub fn section_decoder() -> decode.Decoder(Section) {
+  decode_section()
+}
+
 // ─── Execution models ───────────────────────────────────────────────────────
 
 pub type StepExecution {
@@ -1309,6 +1618,34 @@ pub fn task_filters_to_query(filters: TaskFilters) -> List(#(String, String)) {
     None -> params
   }
   params
+}
+
+/// Body for `POST /api/v1/tasks/:id/sections` — the type, text and optional
+/// code reference of the new section; the engine assigns `id`, `task_id` and
+/// `order`. `code_ref` is omitted (not sent as null) when absent.
+pub type SectionCreate {
+  SectionCreate(
+    section_type: SectionType,
+    content: String,
+    code_ref: Option(CodeRef),
+  )
+}
+
+pub fn encode_section_create(body: SectionCreate) -> json.Json {
+  let entries = [
+    #("section_type", encode_section_type(body.section_type)),
+    #("content", json.string(body.content)),
+  ]
+  json.object(case body.code_ref {
+    None -> entries
+    Some(code_ref) -> [#("code_ref", encode_code_ref(code_ref)), ..entries]
+  })
+}
+
+/// Body for `PATCH /api/v1/sections/:id` clearing a section's code reference:
+/// `{"code_ref": null}` is the engine's way of detaching it.
+pub fn encode_code_ref_clear() -> json.Json {
+  json.object([#("code_ref", json.null())])
 }
 
 pub type StartFlowRequest {

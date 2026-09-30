@@ -9,12 +9,23 @@
 // Endpoints implemented (subset of facets' executions-api contract, C8):
 //   GET  /health
 //   GET  /api/v1/tasks                              seeded task list
+//   POST /api/v1/tasks                              create a task
+//   GET  /api/v1/tasks/ready                unblocked, non-terminal tasks
 //   GET  /api/v1/tasks/:id                          one task
+//   PATCH /api/v1/tasks/:id                 update status/priority/etc
+//   DELETE /api/v1/tasks/:id                archive the task
+//   POST /api/v1/tasks/:id/dependencies             { depends_on }
+//   DELETE /api/v1/tasks/:id/dependencies/:depends_on
+//   GET  /api/v1/tasks/:id/blockers         incomplete blockers only
+//   GET  /api/v1/tasks/:id/sections         always 404 (not yet implemented)
+//   GET  /api/v1/tasks/:id/flow             bound flow execution state
 //   GET  /api/v1/tasks/:id/executions      history (?limit&before_sequence)
 //   GET  /api/v1/executions/active         running + awaiting_input (?limit)
 //   GET  /api/v1/executions/:id            one step execution
 //   GET  /api/v1/executions/:id/logs       session log page (?limit&before_sequence)
 //   POST /api/v1/executions/:id/logs       append an event (payload: {event_type, payload})
+//   GET  /api/v1/flow-templates            prebuilt template registry
+//   GET  /api/v1/flow-templates/:id        one template by id or slug
 //
 // Pages are returned newest-first (sequence descending) with the `sequence`
 // field the desktop uses as its `before_sequence` cursor; `has_more` reports
@@ -103,6 +114,9 @@ const tasks = [
  * terminal state before the dependent task leaves the ready queue.
  */
 const blockedBy = new Map();
+
+/** Monotonic counter for generated task ids. */
+let nextTaskSeq = tasks.length + 1;
 
 function step(
 	id,
@@ -861,6 +875,45 @@ function route(req) {
 		return { status: 200, body: JSON.stringify(tasks) };
 	}
 
+	// POST /api/v1/tasks — create a task from a JSON body.
+	if (req.method === "POST" && rest.length === 1 && rest[0] === "tasks") {
+		let data = {};
+		try {
+			data = JSON.parse(req.body || "{}");
+		} catch {
+			data = {};
+		}
+		if (typeof data.title !== "string" || data.title.trim().length === 0) {
+			return {
+				status: 422,
+				body: errorBody("invalid_title", "title is required"),
+			};
+		}
+		const seq = nextTaskSeq++;
+		const id = `t-${String(seq).padStart(3, "0")}`;
+		const now = Math.floor(Date.now() / 1000);
+		const task = {
+			id,
+			short_id: id.slice(0, 8),
+			title: data.title.trim(),
+			description: typeof data.description === "string" ? data.description : "",
+			level: data.level || "task",
+			priority: data.priority || "medium",
+			status: "todo",
+			tags: Array.isArray(data.tags) ? data.tags : [],
+			parent_id: data.parent_id ?? null,
+			flow_template_id: null,
+			flow_instance_id: null,
+			current_node_id: null,
+			worktree: null,
+			archived: false,
+			created_at: now,
+			updated_at: now,
+		};
+		tasks.push(task);
+		return { status: 201, body: JSON.stringify(task) };
+	}
+
 	// GET /api/v1/tasks/ready — unblocked, non-terminal tasks.
 	if (req.method === "GET" && rest.length === 2 && rest[0] === "tasks" && rest[1] === "ready") {
 		return { status: 200, body: JSON.stringify(tasks.filter(isReadyTask)) };
@@ -895,6 +948,34 @@ function route(req) {
 			: { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
 	}
 
+	// PATCH /api/v1/tasks/:id — update status/priority/etc.
+	if (req.method === "PATCH" && rest.length === 2 && rest[0] === "tasks") {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		let patch = {};
+		try {
+			patch = JSON.parse(req.body || "{}");
+		} catch {
+			patch = {};
+		}
+		Object.assign(task, patch, { updated_at: Math.floor(Date.now() / 1000) });
+		return { status: 200, body: JSON.stringify(task) };
+	}
+
+	// DELETE /api/v1/tasks/:id — archive the task.
+	if (req.method === "DELETE" && rest.length === 2 && rest[0] === "tasks") {
+		const task = tasks.find((candidate) => candidate.id === rest[1]);
+		if (!task) {
+			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
+		}
+		task.archived = true;
+		task.status = "archived";
+		task.updated_at = Math.floor(Date.now() / 1000);
+		return { status: 200, body: JSON.stringify({ ok: true }) };
+	}
+
 	// GET /api/v1/tasks/:id/flow — the task's current flow execution state.
 	if (
 		req.method === "GET" &&
@@ -927,6 +1008,19 @@ function route(req) {
 			return { status: 404, body: errorBody("not_found", `task ${rest[1]}`) };
 		}
 		return { status: 200, body: JSON.stringify(incompleteBlockers(task.id)) };
+	}
+
+	// GET /api/v1/tasks/:id/sections — Crystalline does not expose sections yet.
+	if (
+		req.method === "GET" &&
+		rest.length === 3 &&
+		rest[0] === "tasks" &&
+		rest[2] === "sections"
+	) {
+		return {
+			status: 404,
+			body: errorBody("not_found", `/api/v1/tasks/${rest[1]}/sections`),
+		};
 	}
 
 	// POST /api/v1/tasks/:id/dependencies — add a blocker ({ depends_on }).

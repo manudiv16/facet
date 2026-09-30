@@ -1,0 +1,13 @@
+{
+  "name": "facet",
+  "displayName": "Facet",
+  "version": "0.1.0",
+  "description": "Drive the Crystalline engine from Claude Code through the facet CLI: tasks, sections, flow templates and execution logs as skills.",
+  "author": {
+    "name": "manudiv16",
+    "url": "https://github.com/manudiv16"
+  },
+  "repository": "https://github.com/manudiv16/facet",
+  "license": "Apache-2.0",
+  "keywords": ["crystalline", "facet", "tasks", "flows", "orchestration"]
+}

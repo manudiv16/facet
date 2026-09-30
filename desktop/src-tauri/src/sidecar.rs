@@ -5,6 +5,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use crate::config::{self, SidecarConfig};
+use crate::secrets::{self, KeyStore};
 
 /// How the app talks to Crystalline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +125,20 @@ fn is_port_free(port: u16) -> bool {
 }
 
 /// Spawn the Crystalline sidecar with `PORT` and `CRYSTALLINE_DB` set.
+///
+/// In embedded mode the configured provider keys are read from the OS
+/// keychain and forwarded as environment variables; remote mode never
+/// receives them (see [`apply_provider_env`]).
 pub fn spawn(config: &SidecarConfig) -> Result<SidecarHandle> {
+    spawn_with_store(config, &secrets::KeyringStore)
+}
+
+/// [`spawn`] with an injectable key store so forwarding can be exercised in
+/// tests without a real OS keychain.
+fn spawn_with_store(
+    config: &SidecarConfig,
+    store: &dyn KeyStore,
+) -> Result<SidecarHandle> {
     let name = &config.sidecar.binary_name;
     let path = resolve_binary(name).ok_or_else(|| {
         anyhow!(
@@ -151,6 +165,10 @@ pub fn spawn(config: &SidecarConfig) -> Result<SidecarHandle> {
         .env("PORT", port.to_string())
         .env("CRYSTALLINE_DB", db_path.to_string_lossy().to_string());
 
+    // Provider keys are only for the embedded engine; a remote instance manages
+    // its own credentials and must never receive ours.
+    apply_provider_env(&mut command, &determine_mode(), store);
+
     // On Windows, avoid flashing a console window for the sidecar.
     #[cfg(windows)]
     {
@@ -170,6 +188,21 @@ pub fn spawn(config: &SidecarConfig) -> Result<SidecarHandle> {
         port,
         stopped: false,
     })
+}
+
+/// Forward configured provider keys to the sidecar child — embedded mode only.
+///
+/// Remote mode returns early so a remote Crystalline instance never receives
+/// the desktop user's provider keys. Extracted from [`spawn_with_store`] so the
+/// mode gate and the mapping are unit-testable without a real OS keychain or
+/// spawning a process.
+fn apply_provider_env(command: &mut Command, mode: &Mode, store: &dyn KeyStore) {
+    if matches!(mode, Mode::Remote(_)) {
+        return;
+    }
+    for (name, value) in secrets::forwarded_env(store) {
+        command.env(name, value);
+    }
 }
 
 /// Locate the platform-suffixed sidecar binary.
@@ -321,6 +354,59 @@ pub fn is_running(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::test_support::FakeStore;
+    use std::collections::HashMap;
+
+    /// Explicitly-set environment variables on a `Command` (not the inherited
+    /// ones), keyed by name.
+    fn explicit_env(command: &Command) -> HashMap<String, Option<String>> {
+        command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn embedded_mode_forwards_configured_provider_keys() {
+        let store = FakeStore::with(&[("anthropic", "sk-fake-a"), ("openai", "sk-fake-o")]);
+        let mut command = Command::new("echo");
+        apply_provider_env(&mut command, &Mode::Embedded, &store);
+
+        let env = explicit_env(&command);
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").cloned().flatten().as_deref(),
+            Some("sk-fake-a")
+        );
+        assert_eq!(
+            env.get("OPENAI_API_KEY").cloned().flatten().as_deref(),
+            Some("sk-fake-o")
+        );
+        assert!(
+            !env.contains_key("GROQ_API_KEY"),
+            "unconfigured providers must not be forwarded"
+        );
+    }
+
+    #[test]
+    fn remote_mode_never_forwards_provider_keys() {
+        let store = FakeStore::with(&[("anthropic", "sk-fake-a"), ("openai", "sk-fake-o")]);
+        let mut command = Command::new("echo");
+        apply_provider_env(&mut command, &Mode::Remote("https://facet.example".into()), &store);
+
+        let env = explicit_env(&command);
+        assert!(
+            !env.contains_key("ANTHROPIC_API_KEY")
+                && !env.contains_key("OPENAI_API_KEY")
+                && !env.contains_key("GROQ_API_KEY"),
+            "remote mode must not receive any provider key: {:?}",
+            env.keys()
+        );
+    }
 
     #[test]
     fn free_port_is_bindable() {
@@ -373,6 +459,192 @@ mod tests {
 
         handle.stop().expect("stop");
         assert!(!is_running(pid), "sidecar process was orphaned");
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// End-to-end forwarding, proving what lands on the real child process
+    /// environment. Embedded mode must forward the fake key; remote mode must
+    /// forward nothing.
+    ///
+    /// macOS does not expose another process's environment (`ps eww` prints
+    /// none), so instead of reading the env back we interpose a recording
+    /// wrapper as the sidecar binary: it writes the fake-key entries it
+    /// receives to a proof file, then `exec`s the real stub so the spawn path
+    /// (resolution, port, db, health) is exercised unchanged. Only entries
+    /// containing the fake marker are recorded, so a real key inherited from
+    /// the developer's shell can never end up in the proof file.
+    ///
+    /// Skipped when the stub is not installed, mirroring the lifecycle test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_forwards_provider_keys_in_embedded_mode_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(stub_path) = resolve_binary("crystalline") else {
+            eprintln!("skipping: dev stub sidecar not installed");
+            return;
+        };
+
+        const FAKE_KEY: &str = "facet-fake-anthropic-0001";
+
+        // Recording wrapper, placed where `resolve_binary` looks. The
+        // `binaries/` directory is gitignored; the file is removed below.
+        let wrapper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!("facet-env-probe-{}", target_triple()));
+        let script = format!(
+            "#!/bin/sh\nenv | grep 'facet-fake-' > \"$FACET_ENV_PROOF\"\nexec \"{}\"\n",
+            stub_path.display()
+        );
+        std::fs::write(&wrapper, script).expect("write probe wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod probe wrapper");
+
+        let proof = std::env::temp_dir().join(format!("facet-env-proof-{}", std::process::id()));
+        let db_path =
+            std::env::temp_dir().join(format!("facet-test-keys-{}.db", std::process::id()));
+
+        let mut cfg = crate::config::SidecarConfig::load().expect("config");
+        cfg.sidecar.binary_name = "facet-env-probe".into();
+
+        let store = FakeStore::with(&[("anthropic", FAKE_KEY)]);
+        let saved_facet_url = std::env::var("FACET_URL").ok();
+        std::env::set_var("FACET_ENV_PROOF", &proof);
+        std::env::set_var("CRYSTALLINE_DB", &db_path);
+
+        // Helper: spawn, wait for health (which guarantees the wrapper has
+        // written the proof file and exec'd the stub), then stop.
+        async fn spawn_once(cfg: &crate::config::SidecarConfig, store: &dyn KeyStore) {
+            let mut handle = spawn_with_store(cfg, store).expect("spawn sidecar");
+            wait_for_health(
+                &base_url(handle.port()),
+                &cfg.health.path,
+                Duration::from_secs(15),
+                Duration::from_millis(200),
+            )
+            .await
+            .expect("health");
+            handle.stop().expect("stop");
+        }
+
+        // Embedded: the fake key must reach the child environment.
+        std::env::remove_var("FACET_URL");
+        spawn_once(&cfg, &store).await;
+        let forwarded = std::fs::read_to_string(&proof).expect("read embedded proof");
+        assert!(
+            forwarded.contains(&format!("ANTHROPIC_API_KEY={FAKE_KEY}")),
+            "embedded child env must carry the fake key, got: {forwarded:?}"
+        );
+
+        // Remote: the same spawn must forward no provider key at all.
+        let _ = std::fs::remove_file(&proof);
+        std::env::set_var("FACET_URL", "http://127.0.0.1:9");
+        spawn_once(&cfg, &store).await;
+        let forwarded = std::fs::read_to_string(&proof).expect("read remote proof");
+        assert!(
+            !forwarded.contains("facet-fake-"),
+            "remote mode must not forward provider keys, got: {forwarded:?}"
+        );
+
+        // Restore the shared process environment and clean up artifacts.
+        match saved_facet_url {
+            Some(value) => std::env::set_var("FACET_URL", value),
+            None => std::env::remove_var("FACET_URL"),
+        }
+        std::env::remove_var("FACET_ENV_PROOF");
+        let _ = std::fs::remove_file(&proof);
+        let _ = std::fs::remove_file(&wrapper);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Manual acceptance demo for issue #7 against the REAL OS keychain:
+    /// stores a fake key through `KeyringStore`, spawns the real stub via the
+    /// production [`spawn`] entrypoint (behind the same recording wrapper as
+    /// above), prints the proof the child received, then deletes the key.
+    ///
+    /// Skipped by default: `cargo test real_keychain_forwarding_demo -- --ignored --nocapture`.
+    /// Also skipped when a real Anthropic key is already configured, so the
+    /// demo can never clobber it.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "touches the real OS keychain; run manually"]
+    async fn real_keychain_forwarding_demo() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(stub_path) = resolve_binary("crystalline") else {
+            eprintln!("skipping: dev stub sidecar not installed");
+            return;
+        };
+
+        const FAKE_KEY: &str = "facet-fake-demo-0001";
+        let store = secrets::KeyringStore;
+
+        // Never overwrite a real key the developer may have configured.
+        if store
+            .get(secrets::Provider::Anthropic)
+            .expect("keychain read")
+            .is_some()
+        {
+            eprintln!("skipping: an Anthropic key is already in the keychain");
+            return;
+        }
+
+        let wrapper = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!("facet-env-probe-{}", target_triple()));
+        let script = format!(
+            "#!/bin/sh\nenv | grep 'facet-fake-' > \"$FACET_ENV_PROOF\"\nexec \"{}\"\n",
+            stub_path.display()
+        );
+        std::fs::write(&wrapper, script).expect("write probe wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod probe wrapper");
+
+        let proof = std::env::temp_dir().join(format!("facet-env-proof-{}", std::process::id()));
+        let db_path =
+            std::env::temp_dir().join(format!("facet-demo-keys-{}.db", std::process::id()));
+
+        let mut cfg = crate::config::SidecarConfig::load().expect("config");
+        cfg.sidecar.binary_name = "facet-env-probe".into();
+
+        let saved_facet_url = std::env::var("FACET_URL").ok();
+        std::env::remove_var("FACET_URL");
+        std::env::set_var("FACET_ENV_PROOF", &proof);
+        std::env::set_var("CRYSTALLINE_DB", &db_path);
+
+        store
+            .set(secrets::Provider::Anthropic, FAKE_KEY)
+            .expect("store fake key in the real keychain");
+
+        let mut handle = spawn(&cfg).expect("spawn sidecar via production entrypoint");
+        wait_for_health(
+            &base_url(handle.port()),
+            &cfg.health.path,
+            Duration::from_secs(15),
+            Duration::from_millis(200),
+        )
+        .await
+        .expect("health");
+        handle.stop().expect("stop");
+
+        let forwarded = std::fs::read_to_string(&proof).expect("read proof");
+        eprintln!("child env (fake-marker entries only): {forwarded}");
+        assert!(
+            forwarded.contains(&format!("ANTHROPIC_API_KEY={FAKE_KEY}")),
+            "embedded child env must carry the keychain-stored fake key"
+        );
+
+        // Delete the fake key and clean up every artifact.
+        store
+            .delete(secrets::Provider::Anthropic)
+            .expect("delete fake key");
+        match saved_facet_url {
+            Some(value) => std::env::set_var("FACET_URL", value),
+            None => std::env::remove_var("FACET_URL"),
+        }
+        std::env::remove_var("FACET_ENV_PROOF");
+        let _ = std::fs::remove_file(&proof);
+        let _ = std::fs::remove_file(&wrapper);
         let _ = std::fs::remove_file(&db_path);
     }
 }

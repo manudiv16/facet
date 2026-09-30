@@ -28,6 +28,18 @@ env_logger = "0.11"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `keyring` ships one platform-specific credential store per feature. The
+# default (no feature) fallback is an in-memory mock, which is not what we want
+# in a real app, so each platform opts into its native store explicitly.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
 [features]
 # Used for production builds / when no dev server is specified. The Tauri CLI
 # enables this automatically for `tauri build`; do not make it a default.

@@ -2,11 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod secrets;
 mod sidecar;
 
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::secrets::KeyStore;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
@@ -86,6 +88,42 @@ struct AppState {
 #[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> Status {
     state.status.lock().unwrap().clone()
+}
+
+/// Tauri command: store (or replace) an AI provider API key in the OS keychain.
+///
+/// The value is written straight to the keychain; it is never echoed back to
+/// the caller or written to disk or logs. An empty value removes the key.
+#[tauri::command]
+fn set_provider_key(provider: String, key: String) -> Result<(), String> {
+    let provider = secrets::Provider::from_id(&provider)
+        .ok_or_else(|| format!("unknown provider `{provider}`"))?;
+    let store = secrets::KeyringStore;
+    if key.trim().is_empty() {
+        store.delete(provider).map_err(|e| e.to_string())
+    } else {
+        store.set(provider, key.trim()).map_err(|e| e.to_string())
+    }
+}
+
+/// Tauri command: remove an AI provider API key from the OS keychain.
+#[tauri::command]
+fn delete_provider_key(provider: String) -> Result<(), String> {
+    let provider = secrets::Provider::from_id(&provider)
+        .ok_or_else(|| format!("unknown provider `{provider}`"))?;
+    secrets::KeyringStore
+        .delete(provider)
+        .map_err(|e| e.to_string())
+}
+
+/// Tauri command: provider ids that have a key configured (names only, never
+/// the secret value).
+#[tauri::command]
+fn list_provider_keys() -> Vec<String> {
+    secrets::configured_providers(&secrets::KeyringStore)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Store and broadcast a new status.
@@ -232,7 +270,12 @@ fn main() {
             status: Mutex::new(Status::starting("embedded", None, None)),
             sidecar: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![get_config])
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            set_provider_key,
+            delete_provider_key,
+            list_provider_keys
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

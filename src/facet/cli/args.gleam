@@ -23,6 +23,7 @@ pub fn parse(args: List(String)) -> Result(types.ParsedInvocation, String) {
           Ok(types.ParsedInvocation(
             url: globals.url,
             token: globals.token,
+            project: globals.project,
             json: globals.json,
             command: command,
           ))
@@ -37,6 +38,7 @@ type Globals {
   Globals(
     url: Option(String),
     token: Option(String),
+    project: Option(String),
     json: Bool,
     remaining: List(String),
   )
@@ -63,17 +65,30 @@ fn extract_globals(args: List(String)) -> Result(Globals, String) {
     ["--token=" <> token, ..rest] ->
       extract_globals(rest)
       |> result.map(fn(g) { Globals(..g, token: optional_nonempty(token)) })
+    ["--project", project, ..rest] ->
+      extract_globals(rest)
+      |> result.map(fn(g) { Globals(..g, project: Some(project)) })
+    ["--project=" <> project, ..rest] ->
+      extract_globals(rest)
+      |> result.map(fn(g) { Globals(..g, project: optional_nonempty(project)) })
     ["--json", ..rest] ->
       extract_globals(rest)
       |> result.map(fn(g) { Globals(..g, json: True) })
     ["--" <> flag, ..] if flag != "" ->
       Error("unknown flag before command: --" <> first_flag_name(flag))
-    _ -> Ok(Globals(url: None, token: None, json: False, remaining: args))
+    _ ->
+      Ok(Globals(
+        url: None,
+        token: None,
+        project: None,
+        json: False,
+        remaining: args,
+      ))
   }
 }
 
 fn base_globals() -> Globals {
-  Globals(url: None, token: None, json: False, remaining: [])
+  Globals(url: None, token: None, project: None, json: False, remaining: [])
 }
 
 fn optional_nonempty(value: String) -> Option(String) {
@@ -99,8 +114,12 @@ fn parse_command(
   case name, args {
     "health", [] -> Ok(types.Health)
     "help", [] -> Ok(types.Help)
+    "init", _ -> parse_init(args)
+    "path", _ -> parse_id_arg("path", types.Path, args)
+    "stop", _ -> parse_id_arg("stop", types.Stop, args)
     "task", [sub, ..rest] -> parse_task(sub, rest)
     "task", [] -> Error(task_subcommand_help())
+    "artifact", _ -> parse_artifact(args)
     "flow", [sub, ..rest] -> parse_flow(sub, rest)
     "flow", [] -> Error(flow_subcommand_help())
     "exec", [sub, ..rest] -> parse_exec(sub, rest)
@@ -110,7 +129,11 @@ fn parse_command(
 }
 
 fn task_subcommand_help() -> String {
-  "task: missing subcommand (add, list, show, update, delete, depend, undepend, blockers)"
+  "task: missing subcommand (add, list, show, update, delete, depend, undepend, blockers, sections, section, ref, unref)"
+}
+
+fn artifact_subcommand_help() -> String {
+  "artifact: missing subcommand (get, put, list, delete)"
 }
 
 fn flow_subcommand_help() -> String {
@@ -356,6 +379,10 @@ fn parse_task(
     "depend" -> parse_task_depend(args)
     "undepend" -> parse_task_undepend(args)
     "blockers" -> parse_task_blockers(args)
+    "sections" -> parse_task_sections(args)
+    "section" -> parse_task_section(args)
+    "ref" -> parse_task_ref(args)
+    "unref" -> parse_task_unref(args)
     _ -> Error("unknown task subcommand: " <> sub)
   }
 }
@@ -494,6 +521,198 @@ fn parse_task_blockers(args: List(String)) -> Result(types.Command, String) {
   }
 }
 
+fn parse_task_sections(args: List(String)) -> Result(types.Command, String) {
+  use tokens <- result.try(tokenize(args, [], []))
+  case tokens.positionals {
+    [id] -> Ok(types.TaskSections(id))
+    [] -> Error("task sections expects a task id")
+    _ -> Error("task sections takes exactly one id argument")
+  }
+}
+
+fn parse_task_section(args: List(String)) -> Result(types.Command, String) {
+  case args {
+    ["add", ..rest] -> parse_task_section_add(rest)
+    [] -> Error("task section: missing subcommand (add)")
+    [sub, ..] -> Error("unknown task section subcommand: " <> sub)
+  }
+}
+
+fn parse_task_section_add(args: List(String)) -> Result(types.Command, String) {
+  let value_flags = ["type", "content"]
+  use tokens <- result.try(tokenize(args, value_flags, []))
+  case tokens.positionals {
+    [id] -> {
+      use section_type <- result.try(parse_section_type(tokens))
+      use content <- result.try(parse_section_content(tokens))
+      Ok(types.TaskSectionAdd(
+        id,
+        types.TaskSectionAddArgs(section_type:, content:),
+      ))
+    }
+    [] -> Error("task section add expects a task id")
+    _ -> Error("task section add takes exactly one id argument")
+  }
+}
+
+fn parse_section_type(tokens: Tokens) -> Result(models.SectionType, String) {
+  case value_of(tokens, "type") {
+    None -> Error("task section add requires --type <section-type>")
+    Some(raw) ->
+      case models.section_type_from_string(raw) {
+        Ok(section_type) -> Ok(section_type)
+        Error(_) ->
+          Error(
+            "invalid section type: "
+            <> raw
+            <> " (expected goal, context, current_behavior, desired_behavior, checklist_item, testing_criterion, constraint, anti_pattern or failure_test)",
+          )
+      }
+  }
+}
+
+fn parse_section_content(tokens: Tokens) -> Result(String, String) {
+  case value_of(tokens, "content") {
+    None -> Error("task section add requires --content <text>")
+    Some("") -> Error("task section add requires --content <text>")
+    Some(content) -> Ok(content)
+  }
+}
+
+/// `task ref <task-id> <path> [--line-start N] [--line-end N] [--name X]
+/// [--description Y] [--type <t>] [--content <text>]`.
+///
+/// A code reference is a field of a section, so `ref` creates a section whose
+/// `code_ref` is that path. `--type` defaults to `context` and `--content` to
+/// the code path.
+fn parse_task_ref(args: List(String)) -> Result(types.Command, String) {
+  let value_flags = [
+    "line-start",
+    "line-end",
+    "name",
+    "description",
+    "type",
+    "content",
+  ]
+  use tokens <- result.try(tokenize(args, value_flags, []))
+  case tokens.positionals {
+    [task_id, code_path] -> {
+      use line_start <- result.try(parse_int_flag(tokens, "line-start"))
+      use line_end <- result.try(parse_int_flag(tokens, "line-end"))
+      use section_type <- result.try(parse_ref_section_type(tokens))
+      let content = option_unwrap(value_of(tokens, "content"), code_path)
+      Ok(types.TaskRef(
+        task_id,
+        types.TaskRefArgs(
+          code_path: code_path,
+          line_start: line_start,
+          line_end: line_end,
+          name: value_of(tokens, "name"),
+          description: value_of(tokens, "description"),
+          section_type: section_type,
+          content: content,
+        ),
+      ))
+    }
+    [] -> Error("task ref expects <task-id> <path>")
+    [_] -> Error("task ref expects <task-id> <path>")
+    _ -> Error("task ref takes exactly two positional arguments")
+  }
+}
+
+fn parse_ref_section_type(
+  tokens: Tokens,
+) -> Result(models.SectionType, String) {
+  case value_of(tokens, "type") {
+    None -> Ok(models.Context)
+    Some(raw) ->
+      case models.section_type_from_string(raw) {
+        Ok(section_type) -> Ok(section_type)
+        Error(_) -> Error("invalid section type: " <> raw)
+      }
+  }
+}
+
+fn parse_task_unref(args: List(String)) -> Result(types.Command, String) {
+  case args {
+    [task_id, section_id] -> Ok(types.TaskUnref(task_id, section_id))
+    [] -> Error("task unref expects <task-id> <section-id>")
+    [_] -> Error("task unref expects <task-id> <section-id>")
+    _ -> Error("task unref takes exactly two id arguments")
+  }
+}
+
+// ─── init ──────────────────────────────────────────────────────────────────
+
+fn parse_init(args: List(String)) -> Result(types.Command, String) {
+  use tokens <- result.try(tokenize(args, ["name"], []))
+  case tokens.positionals {
+    [slug] ->
+      Ok(types.Init(types.InitArgs(slug: slug, name: value_of(tokens, "name"))))
+    [] -> Error("init expects a project slug")
+    _ -> Error("init takes exactly one slug argument")
+  }
+}
+
+// ─── artifact ──────────────────────────────────────────────────────────────
+
+/// `artifact <task-id> get|put|list|delete [logical-name] [--content <json|->]`
+/// — the brief's argument order, with the task id first.
+fn parse_artifact(args: List(String)) -> Result(types.Command, String) {
+  use tokens <- result.try(tokenize(args, ["content"], []))
+  case tokens.positionals {
+    [] -> Error(artifact_subcommand_help())
+    [_] ->
+      Error("artifact expects <task-id> get|put|list|delete [logical-name]")
+    [task_id, sub, ..rest] -> parse_artifact_sub(task_id, sub, rest, tokens)
+  }
+}
+
+fn parse_artifact_sub(
+  task_id: String,
+  sub: String,
+  rest: List(String),
+  tokens: Tokens,
+) -> Result(types.Command, String) {
+  case sub, rest {
+    "list", [] -> Ok(types.ArtifactList(task_id))
+    "list", _ -> Error("artifact list takes no logical name")
+    "get", [logical_name] -> Ok(types.ArtifactGet(task_id, logical_name))
+    "get", _ -> Error("artifact get expects <task-id> get <logical-name>")
+    "delete", [logical_name] -> Ok(types.ArtifactDelete(task_id, logical_name))
+    "delete", _ ->
+      Error("artifact delete expects <task-id> delete <logical-name>")
+    "put", [logical_name] -> parse_artifact_put(task_id, logical_name, tokens)
+    "put", _ ->
+      Error(
+        "artifact put expects <task-id> put <logical-name> --content <json|->",
+      )
+    _, _ -> Error("unknown artifact subcommand: " <> sub)
+  }
+}
+
+fn parse_artifact_put(
+  task_id: String,
+  logical_name: String,
+  tokens: Tokens,
+) -> Result(types.Command, String) {
+  case value_of(tokens, "content") {
+    None -> Error("artifact put requires --content <json|->")
+    Some("") -> Error("artifact put requires --content <json|->")
+    Some("-") ->
+      Ok(types.ArtifactPut(task_id, logical_name, types.StdinContent))
+    Some(raw) ->
+      Ok(types.ArtifactPut(task_id, logical_name, types.InlineContent(raw)))
+  }
+}
+
+fn option_unwrap(value: Option(String), default: String) -> String {
+  case value {
+    Some(found) -> found
+    None -> default
+  }
+}
+
 // ─── flow ──────────────────────────────────────────────────────────────────
 
 fn parse_flow(
@@ -584,6 +803,21 @@ fn parse_one_id(
   case tokens.positionals {
     [id] -> Ok(constructor(id))
     [] -> Error(label <> " expects an instance id")
+    _ -> Error(label <> " takes exactly one id argument")
+  }
+}
+
+/// Like `parse_one_id`, for commands whose argument is a task or project id
+/// rather than a flow instance.
+fn parse_id_arg(
+  label: String,
+  constructor: fn(String) -> types.Command,
+  args: List(String),
+) -> Result(types.Command, String) {
+  use tokens <- result.try(tokenize(args, [], []))
+  case tokens.positionals {
+    [id] -> Ok(constructor(id))
+    [] -> Error(label <> " expects an id")
     _ -> Error(label <> " takes exactly one id argument")
   }
 }
